@@ -72,6 +72,8 @@ function hostAllowed(url) {
       "privateemail.com",
       "linkedin.com",
       "www.linkedin.com",
+      "upwork.com",
+      "www.upwork.com",
     ]);
     return allow.has(h);
   } catch {

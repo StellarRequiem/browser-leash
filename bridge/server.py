@@ -53,6 +53,8 @@ ALLOWED_HOSTS = frozenset(
         "reddit.com",
         "www.reddit.com",
         "old.reddit.com",
+        "upwork.com",
+        "www.upwork.com",
     }
 )
 
