@@ -71,3 +71,17 @@ When operator says “more access”:
 5. DISARM when session ends
 
 Do **not** grant “all sites” or “no arm” without explicit operator override phrase.
+
+---
+
+## Related plan: full computer use
+
+Desktop / multi-app control is **not** this package. See:
+
+**`~/ops/DESKTOP_LEASH_PLAN.md`** — planned `desktop-leash` (macOS AX + screen + gated input).
+
+| Need | Plane |
+|------|--------|
+| Chrome / X / GitHub web | **browser-leash** (this project) |
+| Other apps / desktop UI | **desktop-leash** (planned) |
+| Tool-call policy | **mcp-assure** |

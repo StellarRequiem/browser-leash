@@ -47,7 +47,11 @@ We will **not** clone OpenAI/Anthropic proprietary native hosts. We **will**:
 3. Keep arm / host allowlist / receipts as the control plane  
 4. Expose a stable agent API (`bridge/client.py` + `docs/AGENT.md`) so Grok’s workflow matches “use the browser tool”  
 
-Computer-use (full desktop) remains optional and separate if you later grant Grok a CUA-like path; browser-leash is the **Chrome session** control plane.
+Computer-use (full desktop) is **on the roadmap** as a **separate** service:
+
+→ **`~/ops/DESKTOP_LEASH_PLAN.md`** (`desktop-leash`, not this repo).
+
+browser-leash remains the **Chrome session** control plane only.
 
 ---
 
