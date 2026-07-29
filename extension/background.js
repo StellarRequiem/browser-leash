@@ -1,13 +1,14 @@
 /**
- * Browser Leash — service worker v0.3.7
+ * Browser Leash — service worker v0.3.8
  * CDP trusted input for React composers; arm-gated actions.
  * 0.3.6: sticky ARM toggle.
  * 0.3.7: if filled-but-disabled, hard-clear + per-char insertText (React enable path).
+ * 0.3.8: short posts (≤280) per-char insertText first; longer enable wait; still human post gate.
  */
 
 const BRIDGE = "http://127.0.0.1:8756";
 const POLL_MS = 800;
-const EXT_VERSION = "0.3.7";
+const EXT_VERSION = "0.3.8";
 
 let polling = false;
 
@@ -316,82 +317,19 @@ async function cdpFillComposer(tabId, text) {
     await sleep(120);
     await cdpClearComposer(target);
 
-    let method = "none";
-
-    // --- Strategy 1: system clipboard + Cmd+V (trusted paste into React) ---
-    try {
-      // Prefer extension clipboard (system-wide); page clipboard often denied.
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
-          expression: `navigator.clipboard.writeText(${JSON.stringify(text)})`,
-          awaitPromise: true,
-        });
-      }
-      await sleep(80);
-      await cdpMetaKey(target, "v", "KeyV", 86);
-      await sleep(450);
-      method = "cmd_v";
-    } catch (e) {
-      method = "cmd_v_failed:" + String(e).slice(0, 80);
-    }
-
-    let v = await cdpReadComposerState(target);
     const intentLen = text.trim().length;
     const looksFilled = (state) => {
       const g = state.gotLen || 0;
       const first = (state.firstLine || "").replace(/\s+/g, " ");
       const want = text.trim().split("\n")[0].slice(0, 40);
-      // reject doubled body (gotLen ~2x intent)
       if (intentLen > 0 && g >= intentLen * 1.6) return false;
       if (g >= Math.max(8, Math.floor(intentLen * 0.85)) && first.startsWith(want.slice(0, 12)))
         return true;
       return g >= Math.min(20, intentLen) && g <= intentLen + 5;
     };
 
-    // --- Strategy 2: bulk insertText (fast; may ghost) ---
-    if (!looksFilled(v) || (v.postDisabled && (v.gotLen || 0) < 10)) {
-      await cdpClearComposer(target);
-      await chrome.debugger.sendCommand(target, "Input.insertText", { text });
-      await sleep(350);
-      method = method.startsWith("cmd_v") ? method + "+insertText" : "insertText";
-      v = await cdpReadComposerState(target);
-    }
-
-    // --- Strategy 3: per-character only if still empty/short (never retype a full fill) ---
-    if (!looksFilled(v) && (v.gotLen || 0) < Math.min(20, intentLen || 20)) {
-      await cdpClearComposer(target);
-      await cdpTypeChars(target, ".");
-      await sleep(40);
-      await cdpClearComposer(target);
-      await cdpTypeChars(target, text);
-      await sleep(400);
-      method = "char_keys";
-      v = await cdpReadComposerState(target);
-    }
-
-    // Nudge only when Post still disabled but we have plausible text (space via char only)
-    if (v.postDisabled && looksFilled(v)) {
-      await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
-        type: "char",
-        text: " ",
-        unmodifiedText: " ",
-      });
-      await sleep(40);
-      await cdpBackspace(target);
-      await sleep(300);
-      method = method + "+nudge";
-      v = await cdpReadComposerState(target);
-    }
-
-    // --- Strategy 4: filled but Post still disabled → hard clear + per-char insertText ---
-    // Bulk insertText often ghosts DOM; single-char insertText tends to enable X's Post.
-    if (v.postDisabled && intentLen > 0 && intentLen <= 500) {
-      await cdpClearComposer(target);
-      await cdpClearComposer(target);
-      await sleep(80);
-      for (const ch of text) {
+    async function perCharInsert(body) {
+      for (const ch of body) {
         if (ch === "\n" || ch === "\r") {
           await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
             type: "rawKeyDown",
@@ -415,15 +353,110 @@ async function cdpFillComposer(tabId, text) {
         } else {
           await chrome.debugger.sendCommand(target, "Input.insertText", { text: ch });
         }
-        await sleep(8);
+        await sleep(6);
       }
-      await sleep(400);
-      method = method + "+insertText_per_char";
+    }
+
+    let method = "none";
+    let v = { gotLen: 0, postDisabled: true };
+
+    // --- Strategy 0 (0.3.8): short posts — per-char insertText FIRST ---
+    if (intentLen > 0 && intentLen <= 280) {
+      await perCharInsert(text);
+      await sleep(500);
+      method = "insertText_per_char_first";
+      v = await cdpReadComposerState(target);
+      // poll enable up to ~2s
+      for (let i = 0; i < 8 && v.postDisabled && looksFilled(v); i++) {
+        await sleep(250);
+        v = await cdpReadComposerState(target);
+      }
+      if (looksFilled(v) && !v.postDisabled) {
+        v.method = method;
+        return {
+          ok: true,
+          readyToPost: true,
+          code: "CDP_FILLED",
+          detail: `cdp method=${method} gotLen=${v.gotLen} postDisabled=${v.postDisabled} first=${JSON.stringify(v.firstLine)}`,
+          data: v,
+        };
+      }
+      await cdpClearComposer(target);
+      await sleep(80);
+    }
+
+    // --- Strategy 1: system clipboard + Cmd+V ---
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+          expression: `navigator.clipboard.writeText(${JSON.stringify(text)})`,
+          awaitPromise: true,
+        });
+      }
+      await sleep(80);
+      await cdpMetaKey(target, "v", "KeyV", 86);
+      await sleep(450);
+      method = method === "none" ? "cmd_v" : method + "+cmd_v";
+    } catch (e) {
+      method = (method === "none" ? "" : method + "+") + "cmd_v_failed:" + String(e).slice(0, 60);
+    }
+
+    v = await cdpReadComposerState(target);
+
+    // --- Strategy 2: bulk insertText (fast; may ghost) ---
+    if (!looksFilled(v) || (v.postDisabled && (v.gotLen || 0) < 10)) {
+      await cdpClearComposer(target);
+      await chrome.debugger.sendCommand(target, "Input.insertText", { text });
+      await sleep(350);
+      method = method + "+insertText";
       v = await cdpReadComposerState(target);
     }
 
+    // --- Strategy 3: key events if still empty/short ---
+    if (!looksFilled(v) && (v.gotLen || 0) < Math.min(20, intentLen || 20)) {
+      await cdpClearComposer(target);
+      await cdpTypeChars(target, ".");
+      await sleep(40);
+      await cdpClearComposer(target);
+      await cdpTypeChars(target, text);
+      await sleep(400);
+      method = method + "+char_keys";
+      v = await cdpReadComposerState(target);
+    }
+
+    // Nudge when filled but Post disabled
+    if (v.postDisabled && looksFilled(v)) {
+      await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+        type: "char",
+        text: " ",
+        unmodifiedText: " ",
+      });
+      await sleep(40);
+      await cdpBackspace(target);
+      await sleep(300);
+      method = method + "+nudge";
+      v = await cdpReadComposerState(target);
+    }
+
+    // --- Strategy 4: still disabled → hard clear + per-char ---
+    if (v.postDisabled && intentLen > 0 && intentLen <= 500) {
+      await cdpClearComposer(target);
+      await cdpClearComposer(target);
+      await sleep(80);
+      await perCharInsert(text);
+      await sleep(500);
+      method = method + "+insertText_per_char";
+      v = await cdpReadComposerState(target);
+      for (let i = 0; i < 10 && v.postDisabled && looksFilled(v); i++) {
+        await sleep(200);
+        v = await cdpReadComposerState(target);
+      }
+    }
+
     v.method = method;
-    const ready = (v.gotLen || 0) >= 20 && !v.postDisabled;
+    const ready = looksFilled(v) && !v.postDisabled;
     return {
       ok: (v.gotLen || 0) > 0,
       readyToPost: ready,
@@ -791,7 +824,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const until = Number(st.armUntil || 0);
       sendResponse({
         version: EXT_VERSION,
-        expectVersion: bridge?.expect_extension_version || "0.3.7",
+        expectVersion: bridge?.expect_extension_version || "0.3.8",
         armed: isArmedLocal(st),
         armUntil: until,
         armMode: until > 0 ? "timed" : st.armed ? "toggle" : "off",

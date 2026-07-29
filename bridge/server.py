@@ -203,7 +203,7 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             "allowed_hosts": sorted(ALLOWED_HOSTS),
             "queue_depth": len(_queue),
             "extension": ext,
-            "expect_extension_version": "0.3.7",
+            "expect_extension_version": "0.3.8",
             "arm_mode": "toggle" if ARM_TTL_SEC <= 0 else f"timed_{ARM_TTL_SEC}s",
             "action_tiers": dict(ACTION_TIERS),
             "permission_doc": "docs/PERMISSION_TIERS.md",
@@ -368,7 +368,7 @@ class Handler(BaseHTTPRequestHandler):
                 _extension["version"] = body.get("extensionVersion")
                 _extension["hasDebugger"] = body.get("hasDebugger")
                 _extension["last_hello"] = _now()
-            self._json(200, {"ok": True, "expect": "0.3.7"})
+            self._json(200, {"ok": True, "expect": "0.3.8"})
             return
         self._json(404, {"ok": False, "code": "NOT_FOUND"})
 
