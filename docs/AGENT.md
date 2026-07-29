@@ -1,0 +1,59 @@
+# Agent control plane — browser-leash
+
+## When operator says “post to X”
+
+1. Ensure bridge is up: `curl -s http://127.0.0.1:8756/v1/status`
+2. If `armed: false`, tell operator to open **Browser Leash** popup → **ARM (on)** (sticky toggle until DISARM)
+3. After extension code changes: operator must **Reload** the extension, then re-ARM if needed
+4. Prefer ≤280 characters unless Premium long-form is confirmed
+5. Write post text to a temp file (preserve newlines)
+6. Navigate compose first (more reliable):
+
+```bash
+python3 ~/browser-leash/bridge/client.py navigate --url "https://x.com/compose/post"
+python3 ~/browser-leash/bridge/client.py draft --text-file /tmp/x-post.txt
+# check result data.gotLen / postDisabled / firstLine
+# Prefer: if postDisabled, ask operator to click Post (do NOT immediately re-post fill)
+# Only if postDisabled=false:
+python3 ~/browser-leash/bridge/client.py post --text-file /tmp/x-post.txt
+# or click-only after a good draft (avoids double-fill):
+python3 ~/browser-leash/bridge/client.py post --click-only
+```
+
+7. If confirm mode on: badge **POST** → popup → **Confirm post**
+8. Report bridge JSON + code. Success only if `ok: true` and `POST_CLICKED` **or** operator posted + live snapshot
+9. If `POST_DISABLED` / `FILL_FAILED`: React fill failed — do not claim post; do not stack another fill without clear
+10. Remind operator to **DISARM** when done
+11. After any extension code change: operator **Reload** until `status.extension.version` matches disk (0.3.2+)
+
+## Browser actions (parity surface with Claude/Codex Chrome plugins)
+
+```bash
+python3 ~/browser-leash/bridge/client.py tabs
+python3 ~/browser-leash/bridge/client.py navigate --url "https://github.com/StellarRequiem/mcp-assure"
+python3 ~/browser-leash/bridge/client.py snapshot
+python3 ~/browser-leash/bridge/client.py screenshot --out /tmp/page.png
+python3 ~/browser-leash/bridge/client.py click --selector "css-selector"
+python3 ~/browser-leash/bridge/client.py type --selector "input" --text "hello"
+```
+
+## Rules
+
+- **Never** claim a successful post without `ok: true` from the bridge
+- **Never** store X passwords; session is the operator’s Chrome login
+- Deny-by-default: unknown hosts/actions fail closed
+- Prefer draft first if operator wants review without posting
+
+## Start bridge (if down)
+
+```bash
+python3 ~/browser-leash/bridge/server.py
+# or:
+# nohup python3 ~/browser-leash/bridge/server.py >>~/browser-leash/receipts/bridge.log 2>&1 &
+```
+
+## Parity note
+
+Claude/Codex use proprietary Chrome native hosts + optional Computer Use.  
+browser-leash is our **local deny-by-default** Chrome session control plane — not full desktop CUA.
+See `docs/CAPABILITY_GAP.md`.

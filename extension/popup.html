@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Browser Leash</title>
+  <style>
+    :root { font-family: ui-sans-serif, system-ui, sans-serif; color: #e8f0ee; background: #0b1418; }
+    body { margin: 0; width: 320px; padding: 14px; }
+    h1 { font-size: 14px; margin: 0 0 8px; letter-spacing: 0.04em; }
+    .muted { color: #8aa; font-size: 12px; line-height: 1.4; }
+    .row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    button {
+      border: 1px solid #2a4a52; background: #132228; color: #e8f0ee;
+      padding: 8px 12px; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 12px;
+    }
+    button.arm { border-color: #3d8f6e; color: #7dffc8; }
+    button.disarm { border-color: #8f3d3d; color: #ffb0b0; }
+    button.confirm { border-color: #c45c26; color: #ffc58a; width: 100%; }
+    .status { margin-top: 10px; padding: 10px; background: #0f1c22; border: 1px solid #243b42; border-radius: 6px; font-size: 12px; }
+    .ok { color: #7dffc8; } .bad { color: #ff8e8e; } .warn { color: #ffc58a; }
+    .pending { margin-top: 12px; padding: 10px; border: 1px solid #c45c26; border-radius: 6px; background: #1a120c; }
+    .pending pre { white-space: pre-wrap; font-size: 11px; max-height: 120px; overflow: auto; margin: 8px 0; color: #ddd; }
+  </style>
+</head>
+<body>
+  <h1>BROWSER LEASH</h1>
+  <p class="muted">Local control plane. Deny-by-default. ARM is a <b>toggle</b> (stays on until DISARM). Posts still need confirm.</p>
+  <div class="status" id="status">Loading…</div>
+  <div class="row">
+    <button class="arm" id="arm">ARM (on)</button>
+    <button class="disarm" id="disarm">DISARM (off)</button>
+    <button id="refresh">Refresh</button>
+  </div>
+  <div class="pending" id="pending" hidden>
+    <div class="warn"><b>Post pending confirmation</b></div>
+    <pre id="pendingText"></pre>
+    <div class="row">
+      <button class="confirm" id="confirmYes">Confirm post</button>
+      <button class="disarm" id="confirmNo">Reject</button>
+    </div>
+  </div>
+  <p class="muted" style="margin-top:14px">Bridge: <code>127.0.0.1:8756</code> · badge <b>ARM</b> when on</p>
+  <script src="popup.js"></script>
+</body>
+</html>

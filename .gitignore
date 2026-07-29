@@ -1,0 +1,11 @@
+receipts/
+__pycache__/
+*.pyc
+.DS_Store
+bridge/.state.json
+extension/.debug
+receipts/
+bridge/.state.json
+__pycache__/
+*.pyc
+.DS_Store
