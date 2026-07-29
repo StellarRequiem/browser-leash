@@ -255,16 +255,24 @@ async function cdpReadComposerState(target) {
         || document.querySelector('div.public-DraftEditor-content[contenteditable="true"]')
         || document.querySelector('div[role="textbox"][contenteditable="true"]');
       const t = (el && (el.innerText || el.textContent) || '').replace(/\\u200b/g,'').trim();
-      const btn = document.querySelector('[data-testid="tweetButtonInline"]')
-        || document.querySelector('[data-testid="tweetButton"]');
-      const disabled = !btn || btn.getAttribute('aria-disabled') === 'true' || !!btn.disabled;
+      const btns = [
+        ...document.querySelectorAll('[data-testid="tweetButtonInline"]'),
+        ...document.querySelectorAll('[data-testid="tweetButton"]'),
+      ];
+      const isDisabled = (btn) =>
+        !btn || btn.getAttribute('aria-disabled') === 'true' || !!btn.disabled
+        || (btn.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+      const enabled = btns.find((b) => !isDisabled(b));
+      const anyBtn = enabled || btns[0] || null;
       const first = t.split('\\n')[0] || '';
       return {
         gotLen: t.length,
         firstLine: first.slice(0, 120),
-        postDisabled: disabled,
+        postDisabled: !enabled,
         startsWithShipped: t.startsWith('Shipped'),
-        hasBtn: !!btn,
+        hasBtn: btns.length > 0,
+        enabledBtnTestId: enabled ? (enabled.getAttribute('data-testid') || '') : '',
+        btnCount: btns.length,
       };
     })()`,
     returnByValue: true,
@@ -470,22 +478,40 @@ async function cdpFillComposer(tabId, text) {
 
 async function cdpClickPost(tabId) {
   return withDebugger(tabId, async (target) => {
-    const loc = await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
-      expression: `(() => {
-        const btn = document.querySelector('[data-testid="tweetButtonInline"]')
-          || document.querySelector('[data-testid="tweetButton"]');
-        if (!btn) return { ok: false, reason: 'no_btn' };
-        if (btn.getAttribute('aria-disabled') === 'true' || btn.disabled)
-          return { ok: false, reason: 'disabled' };
-        const r = btn.getBoundingClientRect();
-        return { ok: true, x: r.left + r.width/2, y: r.top + r.height/2 };
-      })()`,
-      returnByValue: true,
-    });
-    const v = loc?.result?.value || {};
+    // Prefer an enabled Post button; poll briefly for React to enable
+    let v = {};
+    for (let i = 0; i < 15; i++) {
+      const loc = await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+        expression: `(() => {
+          const btns = [
+            ...document.querySelectorAll('[data-testid="tweetButtonInline"]'),
+            ...document.querySelectorAll('[data-testid="tweetButton"]'),
+          ];
+          const isDisabled = (btn) =>
+            !btn || btn.getAttribute('aria-disabled') === 'true' || !!btn.disabled;
+          const btn = btns.find((b) => !isDisabled(b)) || null;
+          if (!btn) {
+            return { ok: false, reason: btns.length ? 'disabled' : 'no_btn', btnCount: btns.length };
+          }
+          btn.scrollIntoView({ block: 'center', inline: 'center' });
+          const r = btn.getBoundingClientRect();
+          return {
+            ok: true,
+            x: r.left + r.width/2,
+            y: r.top + r.height/2,
+            testId: btn.getAttribute('data-testid') || '',
+          };
+        })()`,
+        returnByValue: true,
+      });
+      v = loc?.result?.value || {};
+      if (v.ok) break;
+      await sleep(200);
+    }
     if (!v.ok) {
       return { ok: false, code: "POST_NOT_READY", detail: v.reason || "no button" };
     }
+    // Trusted mouse click
     await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
       type: "mousePressed",
       x: v.x,
@@ -500,8 +526,27 @@ async function cdpClickPost(tabId) {
       button: "left",
       clickCount: 1,
     });
-    await new Promise((r) => setTimeout(r, 1200));
-    return { ok: true, code: "POST_CLICKED", detail: "CDP mouse click on Post" };
+    // Also dispatch DOM click as belt-and-suspenders
+    await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
+      expression: `(() => {
+        const btns = [
+          ...document.querySelectorAll('[data-testid="tweetButtonInline"]'),
+          ...document.querySelectorAll('[data-testid="tweetButton"]'),
+        ];
+        const isDisabled = (btn) =>
+          !btn || btn.getAttribute('aria-disabled') === 'true' || !!btn.disabled;
+        const btn = btns.find((b) => !isDisabled(b));
+        if (btn) { btn.click(); return true; }
+        return false;
+      })()`,
+      returnByValue: true,
+    });
+    await new Promise((r) => setTimeout(r, 1500));
+    return {
+      ok: true,
+      code: "POST_CLICKED",
+      detail: `CDP mouse+dom click on Post (${v.testId || "btn"})`,
+    };
   });
 }
 
