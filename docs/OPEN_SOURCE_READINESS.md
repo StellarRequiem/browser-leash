@@ -1,6 +1,6 @@
 # browser-leash — public open-source readiness
 
-**Decision status:** **DEFERRED** (local control plane today).  
+**Decision status:** **SHIPPED** (operator authorized 2026-07-29) (local control plane today).  
 This file is the prep checklist so a future public ship is architecture-ready, not a ship itself.
 
 ## What would become public
@@ -13,7 +13,7 @@ This file is the prep checklist so a future public ship is architecture-ready, n
 
 ## Before any public repo
 
-- [ ] Operator explicit “open-source browser-leash” ask  
+- [x] Operator explicit “open-source browser-leash” ask  
 - [ ] LICENSE chosen (Apache-2.0 matches mcp-assure)  
 - [ ] `CLAIMS.md` (no auto-post / full CUA)  
 - [ ] `THREAT_MODEL.md` (debugger = high trust; arm required)  
