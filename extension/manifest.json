@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Browser Leash",
-  "version": "0.3.8",
-  "description": "Local-only browser control plane. Sticky ARM. 0.3.8 short-post per-char-first fill. Human Post confirm. Tiered permissions.",
+  "version": "0.3.9",
+  "description": "Local-only browser control plane. Sticky ARM. 0.3.9 short-post per-char-first fill. Human Post confirm. Tiered permissions.",
   "permissions": [
     "tabs",
     "scripting",

@@ -1,14 +1,14 @@
 /**
- * Browser Leash — service worker v0.3.8
+ * Browser Leash — service worker v0.3.9
  * CDP trusted input for React composers; arm-gated actions.
  * 0.3.6: sticky ARM toggle.
  * 0.3.7: if filled-but-disabled, hard-clear + per-char insertText (React enable path).
- * 0.3.8: short posts (≤280) per-char insertText first; longer enable wait; still human post gate.
+ * 0.3.9: short posts (≤280) per-char insertText first; longer enable wait; still human post gate.
  */
 
 const BRIDGE = "http://127.0.0.1:8756";
 const POLL_MS = 800;
-const EXT_VERSION = "0.3.8";
+const EXT_VERSION = "0.3.9";
 
 let polling = false;
 
@@ -360,7 +360,7 @@ async function cdpFillComposer(tabId, text) {
     let method = "none";
     let v = { gotLen: 0, postDisabled: true };
 
-    // --- Strategy 0 (0.3.8): short posts — per-char insertText FIRST ---
+    // --- Strategy 0 (0.3.9): short posts — per-char insertText FIRST ---
     if (intentLen > 0 && intentLen <= 280) {
       await perCharInsert(text);
       await sleep(500);
@@ -371,12 +371,13 @@ async function cdpFillComposer(tabId, text) {
         await sleep(250);
         v = await cdpReadComposerState(target);
       }
-      if (looksFilled(v) && !v.postDisabled) {
+      if (looksFilled(v)) {
+        // Stop multi-strategy stacking (was doubling text). readyToPost only if enabled.
         v.method = method;
         return {
           ok: true,
-          readyToPost: true,
-          code: "CDP_FILLED",
+          readyToPost: !v.postDisabled,
+          code: v.postDisabled ? "CDP_FILLED_BUT_DISABLED" : "CDP_FILLED",
           detail: `cdp method=${method} gotLen=${v.gotLen} postDisabled=${v.postDisabled} first=${JSON.stringify(v.firstLine)}`,
           data: v,
         };
@@ -824,7 +825,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const until = Number(st.armUntil || 0);
       sendResponse({
         version: EXT_VERSION,
-        expectVersion: bridge?.expect_extension_version || "0.3.8",
+        expectVersion: bridge?.expect_extension_version || "0.3.9",
         armed: isArmedLocal(st),
         armUntil: until,
         armMode: until > 0 ? "timed" : st.armed ? "toggle" : "off",
