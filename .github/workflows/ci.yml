@@ -23,3 +23,13 @@ jobs:
           pip install pytest
       - name: Bridge gate proof (offline, temp state — no live bridge)
         run: pytest tests/ -q
+
+  confirm-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Human Post-confirm gate proof (background.js, mocked chrome)
+        run: node test/confirm_gate.mjs
