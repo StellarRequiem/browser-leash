@@ -8,11 +8,12 @@
  * 0.4.1: article_read via executeScript + sendMessage timeouts (poll loop cannot hang).
  * 0.4.2: hello even when disarmed; hard job timeout; bridge rejects stale extension.
  * 0.4.3: x.article_search — keyword search result cards for posts/articles.
+ * 0.5.0: ambient browser — tab create/close/activate, wait/find/links, back/forward/reload.
  */
 
 const BRIDGE = "http://127.0.0.1:8756";
 const POLL_MS = 800;
-const EXT_VERSION = "0.4.3";
+const EXT_VERSION = "0.5.0";
 
 let polling = false;
 
@@ -913,20 +914,70 @@ async function runJob(job) {
     const tabs = await chrome.tabs.query({});
     return {
       ok: true,
+      code: "TAB_LIST",
       data: tabs.map((t) => ({
         id: t.id,
         url: t.url,
         title: t.title,
         active: t.active,
+        windowId: t.windowId,
       })),
     };
+  }
+
+  if (action === "tab.create") {
+    const url = (p.url || "").trim();
+    if (url && !hostAllowed(url)) {
+      return { ok: false, code: "HOST_DENIED", detail: url };
+    }
+    const created = await chrome.tabs.create({
+      url: url || "about:blank",
+      active: p.active !== false,
+    });
+    if (url) await waitTabComplete(created.id).catch(() => {});
+    return {
+      ok: true,
+      code: "TAB_CREATED",
+      data: { id: created.id, url: created.url || url, active: created.active },
+    };
+  }
+
+  if (action === "tab.close") {
+    let tabId = p.tabId || p.id || null;
+    if (!tabId) tabId = await activeTabId();
+    if (!tabId) return { ok: false, code: "NO_TAB" };
+    try {
+      await chrome.tabs.remove(Number(tabId));
+      return { ok: true, code: "TAB_CLOSED", data: { id: Number(tabId) } };
+    } catch (e) {
+      return { ok: false, code: "TAB_CLOSE_FAIL", detail: String(e) };
+    }
+  }
+
+  if (action === "tab.activate") {
+    const tabId = p.tabId || p.id;
+    if (!tabId) return { ok: false, code: "TAB_ID_REQUIRED" };
+    try {
+      const tab = await chrome.tabs.update(Number(tabId), { active: true });
+      if (tab?.windowId != null) {
+        await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+      }
+      return {
+        ok: true,
+        code: "TAB_ACTIVATED",
+        data: { id: tab.id, url: tab.url, title: tab.title },
+      };
+    } catch (e) {
+      return { ok: false, code: "TAB_ACTIVATE_FAIL", detail: String(e) };
+    }
   }
 
   if (action === "page.info") {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     return {
       ok: true,
-      data: tab ? { id: tab.id, url: tab.url, title: tab.title } : null,
+      code: "PAGE_INFO",
+      data: tab ? { id: tab.id, url: tab.url, title: tab.title, status: tab.status } : null,
     };
   }
 
@@ -935,15 +986,174 @@ async function runJob(job) {
     if (!hostAllowed(url)) {
       return { ok: false, code: "HOST_DENIED", detail: url };
     }
+    let tabId = p.tabId || null;
+    if (tabId) {
+      await chrome.tabs.update(Number(tabId), { url, active: p.active !== false });
+      await waitTabComplete(Number(tabId)).catch(() => {});
+      return { ok: true, code: "NAVIGATED", data: { tabId: Number(tabId), url } };
+    }
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab?.id) {
       await chrome.tabs.update(tab.id, { url });
       await waitTabComplete(tab.id);
-      return { ok: true, data: { tabId: tab.id, url } };
+      return { ok: true, code: "NAVIGATED", data: { tabId: tab.id, url } };
     }
     const created = await chrome.tabs.create({ url, active: true });
     await waitTabComplete(created.id);
-    return { ok: true, data: { tabId: created.id, url } };
+    return { ok: true, code: "NAVIGATED", data: { tabId: created.id, url } };
+  }
+
+  if (action === "page.back" || action === "page.forward" || action === "page.reload") {
+    const tabId = p.tabId || (await activeTabId());
+    if (!tabId) return { ok: false, code: "NO_TAB" };
+    try {
+      if (action === "page.reload") {
+        await chrome.tabs.reload(tabId, { bypassCache: !!p.bypass_cache });
+      } else {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (dir) => {
+            if (dir === "back") history.back();
+            else history.forward();
+          },
+          args: [action === "page.back" ? "back" : "forward"],
+        });
+      }
+      await waitTabComplete(tabId).catch(() => {});
+      await new Promise((r) => setTimeout(r, 400));
+      const tab = await chrome.tabs.get(tabId);
+      return {
+        ok: true,
+        code: action === "page.reload" ? "RELOADED" : action === "page.back" ? "BACK" : "FORWARD",
+        data: { tabId, url: tab.url, title: tab.title },
+      };
+    } catch (e) {
+      return { ok: false, code: "NAV_STACK_FAIL", detail: String(e) };
+    }
+  }
+
+  if (action === "page.wait") {
+    const tabId = p.tabId || (await activeTabId());
+    if (!tabId) return { ok: false, code: "NO_TAB" };
+    const mode = String(p.mode || (p.selector ? "selector" : "ms")).toLowerCase();
+    const timeoutMs = Math.min(Number(p.timeout_ms || p.timeout || 15000), 60000);
+    const selector = p.selector || "";
+    const ms = Math.min(Number(p.ms || 500), 30000);
+
+    if (mode === "load" || mode === "complete") {
+      try {
+        await waitTabComplete(tabId, timeoutMs);
+        return { ok: true, code: "WAIT_LOAD", data: { tabId } };
+      } catch (e) {
+        return { ok: false, code: "WAIT_TIMEOUT", detail: String(e) };
+      }
+    }
+    if (mode === "ms" || mode === "delay") {
+      await new Promise((r) => setTimeout(r, ms));
+      return { ok: true, code: "WAIT_MS", data: { ms } };
+    }
+    // selector
+    if (!selector) return { ok: false, code: "SELECTOR_REQUIRED" };
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      try {
+        const inj = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (sel) => !!document.querySelector(sel),
+          args: [selector],
+        });
+        if (inj?.[0]?.result) {
+          return {
+            ok: true,
+            code: "WAIT_SELECTOR",
+            data: { selector, waited_ms: Date.now() - t0 },
+          };
+        }
+      } catch (_) {}
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return {
+      ok: false,
+      code: "WAIT_TIMEOUT",
+      detail: `selector not found within ${timeoutMs}ms: ${selector}`,
+    };
+  }
+
+  if (action === "page.find") {
+    const tabId = p.tabId || (await activeTabId());
+    if (!tabId) return { ok: false, code: "NO_TAB" };
+    const selector = p.selector || "";
+    if (!selector) return { ok: false, code: "SELECTOR_REQUIRED" };
+    const limit = Math.min(Number(p.limit || 20), 50);
+    try {
+      const inj = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (sel, lim) => {
+          const nodes = [...document.querySelectorAll(sel)].slice(0, lim);
+          return nodes.map((el, i) => {
+            const r = el.getBoundingClientRect();
+            return {
+              index: i,
+              tag: el.tagName.toLowerCase(),
+              id: el.id || "",
+              text: (el.innerText || el.textContent || "").trim().slice(0, 200),
+              href: el.href || el.getAttribute("href") || "",
+              role: el.getAttribute("role") || "",
+              aria: el.getAttribute("aria-label") || "",
+              visible: r.width > 0 && r.height > 0,
+              box: {
+                x: Math.round(r.x),
+                y: Math.round(r.y),
+                w: Math.round(r.width),
+                h: Math.round(r.height),
+              },
+            };
+          });
+        },
+        args: [selector, limit],
+      });
+      const matches = inj?.[0]?.result || [];
+      return {
+        ok: true,
+        code: "FIND",
+        data: { selector, count: matches.length, matches },
+      };
+    } catch (e) {
+      return { ok: false, code: "FIND_FAIL", detail: String(e) };
+    }
+  }
+
+  if (action === "page.links") {
+    const tabId = p.tabId || (await activeTabId());
+    if (!tabId) return { ok: false, code: "NO_TAB" };
+    const limit = Math.min(Number(p.limit || 40), 100);
+    try {
+      const inj = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (lim) => {
+          const out = [];
+          const seen = new Set();
+          for (const a of document.querySelectorAll("a[href]")) {
+            const href = a.href || "";
+            if (!href || href.startsWith("javascript:")) continue;
+            const key = href.split("#")[0];
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({
+              href,
+              text: (a.innerText || a.textContent || "").trim().slice(0, 160),
+            });
+            if (out.length >= lim) break;
+          }
+          return out;
+        },
+        args: [limit],
+      });
+      const links = inj?.[0]?.result || [];
+      return { ok: true, code: "LINKS", data: { count: links.length, links } };
+    } catch (e) {
+      return { ok: false, code: "LINKS_FAIL", detail: String(e) };
+    }
   }
 
   if (action === "x.compose_draft" || action === "x.post") {
@@ -1389,7 +1599,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const until = Number(st.armUntil || 0);
       sendResponse({
         version: EXT_VERSION,
-        expectVersion: bridge?.expect_extension_version || "0.4.3",
+        expectVersion: bridge?.expect_extension_version || "0.5.0",
         armed: isArmedLocal(st),
         armUntil: until,
         armMode: until > 0 ? "timed" : st.armed ? "toggle" : "off",

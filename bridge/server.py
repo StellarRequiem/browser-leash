@@ -66,14 +66,23 @@ ALLOWED_ACTIONS = frozenset(
         "page.info",
         "page.snapshot",
         "page.screenshot",
-        "x.article_read",  # full article/status body (scroll + extract)
-        "x.article_search",  # keyword search → result cards
-        # T2 interact
+        "page.find",
+        "page.links",
+        "page.wait",
+        "x.article_read",
+        "x.article_search",
+        # T2 interact / ambient browser
         "tab.navigate",
+        "tab.create",
+        "tab.close",
+        "tab.activate",
         "page.click",
         "page.type",
         "page.press",
         "page.scroll",
+        "page.back",
+        "page.forward",
+        "page.reload",
         # T3 compose / T4 publish
         "x.compose_draft",
         "x.post",
@@ -86,13 +95,22 @@ ACTION_TIERS = {
     "page.info": 1,
     "page.snapshot": 1,
     "page.screenshot": 1,
+    "page.find": 1,
+    "page.links": 1,
+    "page.wait": 1,
     "x.article_read": 1,
     "x.article_search": 1,
     "tab.navigate": 2,
+    "tab.create": 2,
+    "tab.close": 2,
+    "tab.activate": 2,
     "page.click": 2,
     "page.type": 2,
     "page.press": 2,
     "page.scroll": 2,
+    "page.back": 2,
+    "page.forward": 2,
+    "page.reload": 2,
     "x.compose_draft": 3,
     "x.post": 4,
 }
@@ -212,7 +230,7 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             "allowed_hosts": sorted(ALLOWED_HOSTS),
             "queue_depth": len(_queue),
             "extension": ext,
-            "expect_extension_version": "0.4.3",
+            "expect_extension_version": "0.5.0",
             "arm_mode": "toggle" if ARM_TTL_SEC <= 0 else f"timed_{ARM_TTL_SEC}s",
             "action_tiers": dict(ACTION_TIERS),
             "permission_doc": "docs/PERMISSION_TIERS.md",
@@ -254,9 +272,9 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             "extension": {"version": ext_ver, "last_hello": last_hello},
         }
 
-    if action in ("tab.navigate", "x.article_read", "x.article_search"):
+    if action in ("tab.navigate", "tab.create", "x.article_read", "x.article_search"):
         url = str(payload.get("url") or "")
-        if url and not _host_allowed(url):
+        if url and url not in ("about:blank", "chrome://newtab/") and not _host_allowed(url):
             _receipt("deny", {"action": action, "url": url, "reason": "HOST_DENIED"})
             return {"ok": False, "code": "HOST_DENIED", "detail": f"host not allowlisted: {url}"}
         if action == "x.article_search":

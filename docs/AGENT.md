@@ -26,7 +26,22 @@ python3 ~/browser-leash/bridge/client.py post --click-only
 10. Remind operator to **DISARM** when done
 11. After any extension code change: operator **Reload** until `status.extension.version` matches disk (0.3.2+)
 
-## Browser actions (parity surface with Claude/Codex Chrome plugins)
+## Browser actions (ambient Chrome under leash — 0.5.0+)
+
+Prefer **agent-control** host tools:
+
+```bash
+python3 ~/agent-control/cli.py call browser.tabs
+python3 ~/agent-control/cli.py call browser.tab_create --args-json '{"url":"https://xclusivexo.com/"}'
+python3 ~/agent-control/cli.py call browser.navigate --args-json '{"url":"https://github.com/StellarRequiem/mcp-assure"}'
+python3 ~/agent-control/cli.py call browser.wait --args-json '{"mode":"load"}'
+python3 ~/agent-control/cli.py call browser.find --args-json '{"selector":"a","limit":10}'
+python3 ~/agent-control/cli.py call browser.links --args-json '{"limit":20}'
+python3 ~/agent-control/cli.py call browser.snapshot
+python3 ~/agent-control/cli.py call browser.tab_close --args-json '{}'
+```
+
+Direct leash:
 
 ```bash
 python3 ~/browser-leash/bridge/client.py tabs
