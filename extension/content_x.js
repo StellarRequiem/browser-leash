@@ -313,4 +313,223 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     return true;
   }
+  if (msg?.type === "X_ARTICLE_READ") {
+    readXArticle({
+      maxScrolls: msg.maxScrolls || 30,
+      maxChars: msg.maxChars || 200000,
+      scrollPauseMs: msg.scrollPauseMs || 350,
+    })
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, code: "CONTENT_ERROR", detail: String(e) }));
+    return true;
+  }
 });
+
+/**
+ * Full-article / full-post reader for X.
+ * Handles long-form X Articles (/i/article/…), status posts, and author threads.
+ * Scrolls to load lazy content; expands "Show more" / "Show replies" when cheap.
+ */
+function detectXKind(href) {
+  const u = href || location.href;
+  if (/\/i\/article\//i.test(u) || /\/articles?\//i.test(u)) return "article";
+  if (/\/status\/\d+/i.test(u)) return "status";
+  if (/x\.com\/[^/]+\/?$/i.test(u) || /twitter\.com\/[^/]+\/?$/i.test(u)) return "profile";
+  return "page";
+}
+
+function clickExpanders(root) {
+  const scope = root || document;
+  let clicked = 0;
+  const re = /show more|show replies|show this thread|read more|see more|view post engagements/i;
+  const candidates = scope.querySelectorAll(
+    'button, div[role="button"], span[role="button"], a[role="link"]'
+  );
+  for (const el of candidates) {
+    const t = (el.innerText || el.textContent || "").trim();
+    if (!t || t.length > 64) continue;
+    if (!re.test(t)) continue;
+    try {
+      el.click();
+      clicked += 1;
+      if (clicked >= 12) break;
+    } catch (_) {}
+  }
+  return clicked;
+}
+
+function extractArticleBlocks() {
+  // Prefer long-form article shells when present
+  const selectors = [
+    '[data-testid="twitterarticle"]',
+    '[data-testid="article-viewer"]',
+    'article[data-testid="tweet"]',
+    'div[data-testid="cellInnerDiv"]',
+    'main[role="main"]',
+    "article",
+  ];
+  const seen = new Set();
+  const blocks = [];
+  for (const sel of selectors) {
+    for (const el of document.querySelectorAll(sel)) {
+      const text = (el.innerText || "").replace(/\u200b/g, "").trim();
+      if (!text || text.length < 40) continue;
+      // de-dupe by first 120 chars
+      const key = text.slice(0, 120);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      blocks.push({
+        selector: sel,
+        text,
+        len: text.length,
+      });
+    }
+    // If we found a strong article shell, stop early
+    if (sel.includes("article") && blocks.length && blocks[0].len > 500) break;
+  }
+  return blocks;
+}
+
+function extractMeta() {
+  const title = document.title || "";
+  const url = location.href;
+  let author = "";
+  let handle = "";
+  // User name near primary column
+  const userName = document.querySelector('[data-testid="User-Name"]');
+  if (userName) {
+    const lines = (userName.innerText || "").split("\n").map((s) => s.trim()).filter(Boolean);
+    if (lines[0]) author = lines[0];
+    const at = lines.find((l) => l.startsWith("@"));
+    if (at) handle = at;
+  }
+  // Headline for articles
+  let headline = "";
+  const h1 = document.querySelector('h1, [data-testid="tweetText"] span');
+  if (h1 && (h1.innerText || "").trim().length > 8) {
+    headline = (h1.innerText || "").trim().slice(0, 500);
+  }
+  // og:title as fallback
+  const og = document.querySelector('meta[property="og:title"]');
+  if (!headline && og?.content) headline = og.content;
+  return { title, url, author, handle, headline };
+}
+
+function pickBody(blocks, kind) {
+  if (!blocks.length) {
+    const raw = (document.body?.innerText || "").replace(/\u200b/g, "").trim();
+    return raw;
+  }
+  // Prefer the longest coherent block for articles
+  if (kind === "article") {
+    blocks.sort((a, b) => b.len - a.len);
+    return blocks[0].text;
+  }
+  // Status: stitch tweet texts in order (primary + thread visible)
+  if (kind === "status") {
+    const tweets = [...document.querySelectorAll('article[data-testid="tweet"]')].map((el) => {
+      const textEl = el.querySelector('[data-testid="tweetText"]');
+      const text = (textEl?.innerText || el.innerText || "").replace(/\u200b/g, "").trim();
+      return text;
+    }).filter((t) => t.length > 0);
+    if (tweets.length) {
+      // de-dupe consecutive identical
+      const out = [];
+      for (const t of tweets) {
+        if (out[out.length - 1] === t) continue;
+        out.push(t);
+      }
+      return out.join("\n\n---\n\n");
+    }
+  }
+  blocks.sort((a, b) => b.len - a.len);
+  return blocks[0].text;
+}
+
+async function readXArticle(opts) {
+  const maxScrolls = Math.max(1, Math.min(Number(opts.maxScrolls) || 30, 80));
+  const maxChars = Math.max(1000, Math.min(Number(opts.maxChars) || 200000, 500000));
+  const scrollPauseMs = Math.max(100, Math.min(Number(opts.scrollPauseMs) || 350, 2000));
+
+  if (!location.hostname.includes("x.com") && !location.hostname.includes("twitter.com")) {
+    return {
+      ok: false,
+      code: "NOT_X",
+      detail: "Active tab is not x.com/twitter.com — navigate first",
+      data: { url: location.href, title: document.title },
+    };
+  }
+
+  const kind = detectXKind(location.href);
+  let expandClicks = 0;
+  expandClicks += clickExpanders(document);
+
+  // Progressive scroll to force lazy load of long articles
+  let lastHeight = 0;
+  let stable = 0;
+  for (let i = 0; i < maxScrolls; i++) {
+    window.scrollBy({ top: Math.floor(window.innerHeight * 0.9), left: 0, behavior: "instant" });
+    await sleep(scrollPauseMs);
+    if (i % 3 === 2) expandClicks += clickExpanders(document);
+    const h = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+    if (h <= lastHeight + 8) {
+      stable += 1;
+      if (stable >= 3) break;
+    } else {
+      stable = 0;
+      lastHeight = h;
+    }
+  }
+  // Return to top for consistent extraction
+  window.scrollTo({ top: 0, behavior: "instant" });
+  await sleep(200);
+  expandClicks += clickExpanders(document);
+  await sleep(250);
+
+  const meta = extractMeta();
+  const blocks = extractArticleBlocks();
+  let body = pickBody(blocks, kind);
+  let truncated = false;
+  if (body.length > maxChars) {
+    body = body.slice(0, maxChars);
+    truncated = true;
+  }
+  const words = body ? body.split(/\s+/).filter(Boolean).length : 0;
+
+  if (!body || body.length < 20) {
+    return {
+      ok: false,
+      code: "EMPTY_ARTICLE",
+      detail:
+        "Could not extract readable body — page may still be loading, paywalled, or logged out",
+      data: {
+        kind,
+        ...meta,
+        expand_clicks: expandClicks,
+        blocks_found: blocks.length,
+        char_count: body.length,
+        word_count: words,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    code: "ARTICLE_READ",
+    data: {
+      kind,
+      url: meta.url,
+      title: meta.title,
+      author: meta.author,
+      handle: meta.handle,
+      headline: meta.headline,
+      body,
+      char_count: body.length,
+      word_count: words,
+      truncated,
+      expand_clicks: expandClicks,
+      blocks_found: blocks.length,
+      scrolls: maxScrolls,
+    },
+  };
+}

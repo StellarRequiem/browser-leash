@@ -37,6 +37,28 @@ python3 ~/browser-leash/bridge/client.py click --selector "css-selector"
 python3 ~/browser-leash/bridge/client.py type --selector "input" --text "hello"
 ```
 
+## Read full X articles / posts (0.4.0+)
+
+Prefer the **assured host** path:
+
+```bash
+python3 ~/agent-control/cli.py call browser.x_article_read \
+  --args-json '{"url":"https://x.com/i/article/…"}'
+# or status / thread:
+python3 ~/agent-control/cli.py call browser.x_article_read \
+  --args-json '{"url":"https://x.com/user/status/123"}'
+```
+
+Direct leash:
+
+```bash
+python3 ~/browser-leash/bridge/client.py article --url "https://x.com/…/status/…" --out /tmp/x-article.txt
+```
+
+Returns structured `body`, `char_count`, `word_count`, `kind` (`article`|`status`|…), author/handle when present.  
+Requires **ARM** + extension **0.4.0** (Soft Reload until `extension.version` matches `expect_extension_version`).  
+T1 observe only — does not publish.
+
 ## Rules
 
 - **Never** claim a successful post without `ok: true` from the bridge

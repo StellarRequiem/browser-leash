@@ -66,6 +66,7 @@ ALLOWED_ACTIONS = frozenset(
         "page.info",
         "page.snapshot",
         "page.screenshot",
+        "x.article_read",  # full article/status body (scroll + extract)
         # T2 interact
         "tab.navigate",
         "page.click",
@@ -84,6 +85,7 @@ ACTION_TIERS = {
     "page.info": 1,
     "page.snapshot": 1,
     "page.screenshot": 1,
+    "x.article_read": 1,
     "tab.navigate": 2,
     "page.click": 2,
     "page.type": 2,
@@ -208,7 +210,7 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             "allowed_hosts": sorted(ALLOWED_HOSTS),
             "queue_depth": len(_queue),
             "extension": ext,
-            "expect_extension_version": "0.3.9",
+            "expect_extension_version": "0.4.0",
             "arm_mode": "toggle" if ARM_TTL_SEC <= 0 else f"timed_{ARM_TTL_SEC}s",
             "action_tiers": dict(ACTION_TIERS),
             "permission_doc": "docs/PERMISSION_TIERS.md",
@@ -226,9 +228,9 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             "detail": "extension must be ARMED (popup) before browser actions",
         }
 
-    if action == "tab.navigate":
+    if action in ("tab.navigate", "x.article_read"):
         url = str(payload.get("url") or "")
-        if not _host_allowed(url):
+        if url and not _host_allowed(url):
             _receipt("deny", {"action": action, "url": url, "reason": "HOST_DENIED"})
             return {"ok": False, "code": "HOST_DENIED", "detail": f"host not allowlisted: {url}"}
 
@@ -241,6 +243,19 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "code": "EMPTY_TEXT", "detail": "text required (or pass click_only)"}
         if len(text) > 25000:
             return {"ok": False, "code": "TEXT_TOO_LONG", "detail": "text exceeds 25k chars"}
+
+    if action == "x.article_read":
+        # Cap scroll/char knobs so a single job cannot hang the queue forever
+        try:
+            ms = int(payload.get("max_scrolls") or payload.get("maxScrolls") or 30)
+            payload["max_scrolls"] = max(1, min(ms, 80))
+        except (TypeError, ValueError):
+            payload["max_scrolls"] = 30
+        try:
+            mc = int(payload.get("max_chars") or payload.get("maxChars") or 200000)
+            payload["max_chars"] = max(1000, min(mc, 500000))
+        except (TypeError, ValueError):
+            payload["max_chars"] = 200000
 
     job_id = str(uuid.uuid4())
     job = {
@@ -255,7 +270,13 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
     _receipt("enqueue", {"id": job_id, "action": action})
 
     # wait for extension result (timeout)
-    default_timeout = 150 if action == "x.post" else 90
+    # article_read scrolls — needs a longer default window
+    if action == "x.post":
+        default_timeout = 150
+    elif action == "x.article_read":
+        default_timeout = 120
+    else:
+        default_timeout = 90
     timeout = float(payload.get("timeout") or default_timeout)
     deadline = _now() + timeout
     while _now() < deadline:

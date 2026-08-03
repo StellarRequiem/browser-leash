@@ -13,7 +13,7 @@
 | Tier | Name | Requires | Actions (examples) |
 |------|------|----------|-------------------|
 | **T0** | Bridge status | none | `GET /v1/status` (no page mutation) |
-| **T1** | Observe | ARM | `tab.list`, `page.info`, `page.snapshot`, `page.screenshot` |
+| **T1** | Observe | ARM | `tab.list`, `page.info`, `page.snapshot`, `page.screenshot`, **`x.article_read`** (full article/status body) |
 | **T2** | Interact | ARM | `tab.navigate` (allowlist), `page.click`, `page.type`, `page.press`, `page.scroll` |
 | **T3** | Compose | ARM | `x.compose_draft` (fill only; no Post click) |
 | **T4** | Publish | ARM + **post confirm** (default) | `x.post` / `post --click-only` |

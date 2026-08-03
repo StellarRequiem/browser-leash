@@ -66,6 +66,23 @@ def main(argv: list[str] | None = None) -> int:
     scrl.add_argument("--dy", type=int, default=600)
     scrl.add_argument("--dx", type=int, default=0)
 
+    ar = sub.add_parser(
+        "article",
+        help="read full X article / status / thread body (scroll + extract)",
+    )
+    ar.add_argument(
+        "--url",
+        default="",
+        help="optional x.com URL (status, /i/article/, …); omit to use active tab",
+    )
+    ar.add_argument("--max-scrolls", type=int, default=30)
+    ar.add_argument("--max-chars", type=int, default=200000)
+    ar.add_argument(
+        "--out",
+        default="",
+        help="optional path to write body text (UTF-8)",
+    )
+
     args = p.parse_args(argv)
     base = args.base
 
@@ -113,6 +130,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "snapshot":
         print(json.dumps(call(base, "/v1/action", {"action": "page.snapshot"}), indent=2)[:8000])
         return 0
+    if args.cmd == "article":
+        body: dict = {
+            "action": "x.article_read",
+            "max_scrolls": args.max_scrolls,
+            "max_chars": args.max_chars,
+        }
+        if args.url:
+            body["url"] = args.url
+        res = call(base, "/v1/action", body)
+        if args.out and res.get("ok"):
+            data = res.get("data") or {}
+            text = data.get("body") or ""
+            try:
+                with open(args.out, "w", encoding="utf-8") as f:
+                    f.write(text)
+                res.setdefault("data", {})["out"] = args.out
+            except OSError as e:
+                res = {**res, "out_error": str(e)}
+        # Print meta + body prefix (full body may be huge)
+        print(json.dumps(res, indent=2, default=str)[:24000])
+        return 0 if res.get("ok") else 1
     if args.cmd == "screenshot":
         res = call(base, "/v1/action", {"action": "page.screenshot"})
         if args.out and res.get("data", {}).get("dataUrl"):

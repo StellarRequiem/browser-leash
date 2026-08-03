@@ -1,14 +1,15 @@
 /**
- * Browser Leash — service worker v0.3.9
+ * Browser Leash — service worker v0.4.0
  * CDP trusted input for React composers; arm-gated actions.
  * 0.3.6: sticky ARM toggle.
  * 0.3.7: if filled-but-disabled, hard-clear + per-char insertText (React enable path).
  * 0.3.9: short posts (≤280) per-char insertText first; longer enable wait; still human post gate.
+ * 0.4.0: x.article_read — full X article / status / thread text extraction (scroll + expand).
  */
 
 const BRIDGE = "http://127.0.0.1:8756";
 const POLL_MS = 800;
-const EXT_VERSION = "0.3.9";
+const EXT_VERSION = "0.4.0";
 
 let polling = false;
 
@@ -789,6 +790,64 @@ async function runJob(job) {
     }
   }
 
+  if (action === "x.article_read") {
+    // Full article/post body via content script (T1 observe — arm required, no publish).
+    let tabId = p.tabId || null;
+    const url = (p.url || "").trim();
+    if (url) {
+      if (!hostAllowed(url)) {
+        return { ok: false, code: "HOST_DENIED", detail: url };
+      }
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) {
+        await chrome.tabs.update(tab.id, { url });
+        tabId = tab.id;
+      } else {
+        const created = await chrome.tabs.create({ url, active: true });
+        tabId = created.id;
+      }
+      await waitTabComplete(tabId).catch(() => {});
+      // X hydrates client-side — give React a beat
+      await new Promise((r) => setTimeout(r, 1500));
+    } else {
+      tabId = await activeTabId();
+    }
+    if (!tabId) return { ok: false, code: "NO_TAB" };
+
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const tabUrl = tab?.url || "";
+    if (!/x\.com|twitter\.com/i.test(tabUrl)) {
+      return {
+        ok: false,
+        code: "NOT_X",
+        detail: "Active tab is not on x.com — pass url= or navigate first",
+        data: { url: tabUrl },
+      };
+    }
+
+    const maxScrolls = Number(p.max_scrolls ?? p.maxScrolls ?? 30);
+    const maxChars = Number(p.max_chars ?? p.maxChars ?? 200000);
+    const scrollPauseMs = Number(p.scroll_pause_ms ?? p.scrollPauseMs ?? 350);
+
+    // Retry once if content script not ready
+    let res = await sendToTab(tabId, {
+      type: "X_ARTICLE_READ",
+      maxScrolls,
+      maxChars,
+      scrollPauseMs,
+    });
+    if (!res?.ok && (res?.code === "MSG_FAIL" || !res)) {
+      await new Promise((r) => setTimeout(r, 800));
+      res = await sendToTab(tabId, {
+        type: "X_ARTICLE_READ",
+        maxScrolls,
+        maxChars,
+        scrollPauseMs,
+      });
+    }
+    return res || { ok: false, code: "ARTICLE_READ_FAIL", detail: "no content response" };
+  }
+
   return { ok: false, code: "UNKNOWN_ACTION", detail: action };
 }
 
@@ -872,7 +931,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const until = Number(st.armUntil || 0);
       sendResponse({
         version: EXT_VERSION,
-        expectVersion: bridge?.expect_extension_version || "0.3.9",
+        expectVersion: bridge?.expect_extension_version || "0.4.0",
         armed: isArmedLocal(st),
         armUntil: until,
         armMode: until > 0 ? "timed" : st.armed ? "toggle" : "off",
