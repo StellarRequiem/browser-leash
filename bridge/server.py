@@ -210,7 +210,7 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             "allowed_hosts": sorted(ALLOWED_HOSTS),
             "queue_depth": len(_queue),
             "extension": ext,
-            "expect_extension_version": "0.4.0",
+            "expect_extension_version": "0.4.2",
             "arm_mode": "toggle" if ARM_TTL_SEC <= 0 else f"timed_{ARM_TTL_SEC}s",
             "action_tiers": dict(ACTION_TIERS),
             "permission_doc": "docs/PERMISSION_TIERS.md",
@@ -226,6 +226,30 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             "ok": False,
             "code": "NOT_ARMED",
             "detail": "extension must be ARMED (popup) before browser actions",
+        }
+
+    # Fail fast if extension is not polling (sticky arm on bridge alone is not enough)
+    with _lock:
+        last_hello = float((_extension or {}).get("last_hello") or 0)
+        ext_ver = (_extension or {}).get("version")
+    if last_hello <= 0 or (_now() - last_hello) > 45:
+        _receipt(
+            "deny",
+            {
+                "action": action,
+                "reason": "EXTENSION_DISCONNECTED",
+                "last_hello": last_hello,
+                "version": ext_ver,
+            },
+        )
+        return {
+            "ok": False,
+            "code": "EXTENSION_DISCONNECTED",
+            "detail": (
+                "extension not helloing the bridge — Soft Reload Browser Leash, "
+                "then ARM (popup). Sticky bridge arm alone is not enough."
+            ),
+            "extension": {"version": ext_ver, "last_hello": last_hello},
         }
 
     if action in ("tab.navigate", "x.article_read"):

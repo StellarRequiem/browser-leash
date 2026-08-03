@@ -5,11 +5,13 @@
  * 0.3.7: if filled-but-disabled, hard-clear + per-char insertText (React enable path).
  * 0.3.9: short posts (≤280) per-char insertText first; longer enable wait; still human post gate.
  * 0.4.0: x.article_read — full X article / status / thread text extraction (scroll + expand).
+ * 0.4.1: article_read via executeScript + sendMessage timeouts (poll loop cannot hang).
+ * 0.4.2: hello even when disarmed; hard job timeout; bridge rejects stale extension.
  */
 
 const BRIDGE = "http://127.0.0.1:8756";
 const POLL_MS = 800;
-const EXT_VERSION = "0.4.0";
+const EXT_VERSION = "0.4.2";
 
 let polling = false;
 
@@ -138,13 +140,199 @@ async function injectContent(tabId) {
   await new Promise((r) => setTimeout(r, 200));
 }
 
-async function sendToTab(tabId, msg) {
+async function sendToTab(tabId, msg, timeoutMs = 45000) {
   await injectContent(tabId);
   try {
-    return await chrome.tabs.sendMessage(tabId, msg);
+    const p = chrome.tabs.sendMessage(tabId, msg);
+    if (!timeoutMs || timeoutMs <= 0) return await p;
+    return await Promise.race([
+      p,
+      new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              ok: false,
+              code: "MSG_TIMEOUT",
+              detail: `content script did not respond within ${timeoutMs}ms`,
+            }),
+          timeoutMs
+        )
+      ),
+    ]);
   } catch (e) {
     return { ok: false, code: "MSG_FAIL", detail: String(e) };
   }
+}
+
+/** In-page extractor — runs via chrome.scripting.executeScript (no content-script message hang). */
+function pageArticleExtract(opts) {
+  const maxScrolls = Math.max(1, Math.min(Number(opts.maxScrolls) || 12, 40));
+  const maxChars = Math.max(1000, Math.min(Number(opts.maxChars) || 200000, 500000));
+  const scrollPauseMs = Math.max(80, Math.min(Number(opts.scrollPauseMs) || 250, 1500));
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function detectXKind(href) {
+    const u = href || location.href;
+    if (/\/i\/article\//i.test(u) || /\/articles?\//i.test(u)) return "article";
+    if (/\/status\/\d+/i.test(u)) return "status";
+    if (/x\.com\/[^/]+\/?$/i.test(u) || /twitter\.com\/[^/]+\/?$/i.test(u)) return "profile";
+    return "page";
+  }
+
+  function clickExpanders() {
+    let clicked = 0;
+    const re = /show more|show replies|show this thread|read more|see more/i;
+    const candidates = document.querySelectorAll(
+      'button, div[role="button"], span[role="button"]'
+    );
+    for (const el of candidates) {
+      const t = (el.innerText || el.textContent || "").trim();
+      if (!t || t.length > 64 || !re.test(t)) continue;
+      try {
+        el.click();
+        clicked += 1;
+        if (clicked >= 10) break;
+      } catch (_) {}
+    }
+    return clicked;
+  }
+
+  function extractMeta() {
+    const title = document.title || "";
+    const url = location.href;
+    let author = "";
+    let handle = "";
+    const userName = document.querySelector('[data-testid="User-Name"]');
+    if (userName) {
+      const lines = (userName.innerText || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (lines[0]) author = lines[0];
+      const at = lines.find((l) => l.startsWith("@"));
+      if (at) handle = at;
+    }
+    let headline = "";
+    const tweetText = document.querySelector('[data-testid="tweetText"]');
+    if (tweetText && (tweetText.innerText || "").trim().length > 8) {
+      headline = (tweetText.innerText || "").trim().slice(0, 500);
+    }
+    const og = document.querySelector('meta[property="og:title"]');
+    if (!headline && og?.content) headline = og.content;
+    return { title, url, author, handle, headline };
+  }
+
+  function pickBody(kind) {
+    if (kind === "status") {
+      const tweets = [...document.querySelectorAll('article[data-testid="tweet"]')]
+        .map((el) => {
+          const textEl = el.querySelector('[data-testid="tweetText"]');
+          return (textEl?.innerText || el.innerText || "").replace(/\u200b/g, "").trim();
+        })
+        .filter((t) => t.length > 0);
+      if (tweets.length) {
+        const out = [];
+        for (const t of tweets) {
+          if (out[out.length - 1] === t) continue;
+          out.push(t);
+        }
+        return out.join("\n\n---\n\n");
+      }
+    }
+    const selectors = [
+      '[data-testid="twitterarticle"]',
+      '[data-testid="article-viewer"]',
+      'article[data-testid="tweet"]',
+      'div[data-testid="cellInnerDiv"]',
+      'main[role="main"]',
+      "article",
+    ];
+    let best = "";
+    for (const sel of selectors) {
+      for (const el of document.querySelectorAll(sel)) {
+        const text = (el.innerText || "").replace(/\u200b/g, "").trim();
+        if (text.length > best.length) best = text;
+      }
+      if (best.length > 800) break;
+    }
+    if (!best) best = (document.body?.innerText || "").replace(/\u200b/g, "").trim();
+    return best;
+  }
+
+  return (async () => {
+    if (!location.hostname.includes("x.com") && !location.hostname.includes("twitter.com")) {
+      return {
+        ok: false,
+        code: "NOT_X",
+        detail: "Active tab is not x.com/twitter.com",
+        data: { url: location.href, title: document.title },
+      };
+    }
+    const kind = detectXKind(location.href);
+    let expandClicks = clickExpanders();
+    let lastHeight = 0;
+    let stable = 0;
+    for (let i = 0; i < maxScrolls; i++) {
+      // Early exit if we already have a solid body
+      const early = pickBody(kind);
+      if (early.length > 1200 && i >= 2) break;
+      window.scrollBy({
+        top: Math.floor(window.innerHeight * 0.85),
+        left: 0,
+        behavior: "instant",
+      });
+      await sleep(scrollPauseMs);
+      if (i % 3 === 2) expandClicks += clickExpanders();
+      const h = document.documentElement.scrollHeight || 0;
+      if (h <= lastHeight + 8) {
+        stable += 1;
+        if (stable >= 2) break;
+      } else {
+        stable = 0;
+        lastHeight = h;
+      }
+    }
+    window.scrollTo({ top: 0, behavior: "instant" });
+    await sleep(150);
+    expandClicks += clickExpanders();
+    await sleep(200);
+
+    const meta = extractMeta();
+    let body = pickBody(kind);
+    let truncated = false;
+    if (body.length > maxChars) {
+      body = body.slice(0, maxChars);
+      truncated = true;
+    }
+    const words = body ? body.split(/\s+/).filter(Boolean).length : 0;
+    if (!body || body.length < 20) {
+      return {
+        ok: false,
+        code: "EMPTY_ARTICLE",
+        detail: "Could not extract readable body",
+        data: { kind, ...meta, expand_clicks: expandClicks, char_count: body.length, word_count: words },
+      };
+    }
+    return {
+      ok: true,
+      code: "ARTICLE_READ",
+      data: {
+        kind,
+        url: meta.url,
+        title: meta.title,
+        author: meta.author,
+        handle: meta.handle,
+        headline: meta.headline,
+        body,
+        char_count: body.length,
+        word_count: words,
+        truncated,
+        expand_clicks: expandClicks,
+        scrolls: maxScrolls,
+      },
+    };
+  })();
 }
 
 async function withDebugger(tabId, fn) {
@@ -791,7 +979,8 @@ async function runJob(job) {
   }
 
   if (action === "x.article_read") {
-    // Full article/post body via content script (T1 observe — arm required, no publish).
+    // Full article/post body (T1 observe). Prefer executeScript so a hung content-script
+    // channel cannot stall the poll loop.
     let tabId = p.tabId || null;
     const url = (p.url || "").trim();
     if (url) {
@@ -807,8 +996,7 @@ async function runJob(job) {
         tabId = created.id;
       }
       await waitTabComplete(tabId).catch(() => {});
-      // X hydrates client-side — give React a beat
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 1200));
     } else {
       tabId = await activeTabId();
     }
@@ -825,27 +1013,50 @@ async function runJob(job) {
       };
     }
 
-    const maxScrolls = Number(p.max_scrolls ?? p.maxScrolls ?? 30);
+    const maxScrolls = Number(p.max_scrolls ?? p.maxScrolls ?? 12);
     const maxChars = Number(p.max_chars ?? p.maxChars ?? 200000);
-    const scrollPauseMs = Number(p.scroll_pause_ms ?? p.scrollPauseMs ?? 350);
+    const scrollPauseMs = Number(p.scroll_pause_ms ?? p.scrollPauseMs ?? 250);
+    const opts = { maxScrolls, maxChars, scrollPauseMs };
 
-    // Retry once if content script not ready
-    let res = await sendToTab(tabId, {
-      type: "X_ARTICLE_READ",
-      maxScrolls,
-      maxChars,
-      scrollPauseMs,
-    });
-    if (!res?.ok && (res?.code === "MSG_FAIL" || !res)) {
-      await new Promise((r) => setTimeout(r, 800));
-      res = await sendToTab(tabId, {
-        type: "X_ARTICLE_READ",
-        maxScrolls,
-        maxChars,
-        scrollPauseMs,
+    try {
+      const injected = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: pageArticleExtract,
+        args: [opts],
       });
+      const res = injected?.[0]?.result;
+      if (res && typeof res === "object" && (res.ok === true || res.code)) return res;
+      // Fallback: content-script message path (with hard timeout)
+      const cs = await sendToTab(
+        tabId,
+        {
+          type: "X_ARTICLE_READ",
+          maxScrolls,
+          maxChars,
+          scrollPauseMs,
+        },
+        25000
+      );
+      return cs || { ok: false, code: "ARTICLE_READ_FAIL", detail: "empty extract result" };
+    } catch (e) {
+      const cs = await sendToTab(
+        tabId,
+        {
+          type: "X_ARTICLE_READ",
+          maxScrolls,
+          maxChars,
+          scrollPauseMs,
+        },
+        25000
+      );
+      if (cs?.ok) return cs;
+      return {
+        ok: false,
+        code: "ARTICLE_READ_FAIL",
+        detail: String(e),
+        data: cs || null,
+      };
     }
-    return res || { ok: false, code: "ARTICLE_READ_FAIL", detail: "no content response" };
   }
 
   return { ok: false, code: "UNKNOWN_ACTION", detail: action };
@@ -857,18 +1068,33 @@ async function pollLoop() {
   await helloBridge();
   while (true) {
     try {
+      // Always hello so bridge status shows extension.version even when disarmed
+      await helloBridge();
       const arm = await chrome.storage.local.get(["armed", "armUntil"]);
       const armed = isArmedLocal(arm);
       if (!armed) {
         await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
-      await helloBridge();
       const data = await bridgeGet("/v1/poll?wait=5");
       if (data.job) {
         let result;
         try {
-          result = await runJob(data.job);
+          // Hard cap any single job so the poll loop cannot stall forever
+          result = await Promise.race([
+            runJob(data.job),
+            new Promise((resolve) =>
+              setTimeout(
+                () =>
+                  resolve({
+                    ok: false,
+                    code: "JOB_TIMEOUT",
+                    detail: "runJob exceeded 90s",
+                  }),
+                90000
+              )
+            ),
+          ]);
         } catch (e) {
           result = { ok: false, code: "EXT_ERROR", detail: String(e) };
         }
@@ -931,7 +1157,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const until = Number(st.armUntil || 0);
       sendResponse({
         version: EXT_VERSION,
-        expectVersion: bridge?.expect_extension_version || "0.4.0",
+        expectVersion: bridge?.expect_extension_version || "0.4.2",
         armed: isArmedLocal(st),
         armUntil: until,
         armMode: until > 0 ? "timed" : st.armed ? "toggle" : "off",
