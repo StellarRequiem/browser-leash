@@ -56,8 +56,25 @@ python3 ~/browser-leash/bridge/client.py article --url "https://x.com/…/status
 ```
 
 Returns structured `body`, `char_count`, `word_count`, `kind` (`article`|`status`|…), author/handle when present.  
-Requires **ARM** + extension **0.4.0** (Soft Reload until `extension.version` matches `expect_extension_version`).  
+Requires **ARM** + extension **0.4.3+** (Soft Reload until `extension.version` matches `expect_extension_version`).  
 T1 observe only — does not publish.
+
+## Search + curate X articles / posts (0.4.3+)
+
+```bash
+# Search only (cards)
+python3 ~/agent-control/cli.py call browser.x_article_search \
+  --args-json '{"query":"mcp agent security","sort":"latest","max_results":15}'
+
+# Search + rank + optional full-read of top N
+python3 ~/agent-control/cli.py call browser.x_article_curate \
+  --args-json '{"query":"mcp agent security","top_n":5,"read_top":2,"sort":"latest"}'
+
+# Direct leash search
+python3 ~/browser-leash/bridge/client.py search -q "mcp assure" --sort latest --max-results 12
+```
+
+Curation is **heuristic** (keyword hits + article kind + light engagement) under the leash — not X API, not editorial AI.
 
 ## Rules
 

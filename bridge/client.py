@@ -83,6 +83,25 @@ def main(argv: list[str] | None = None) -> int:
         help="optional path to write body text (UTF-8)",
     )
 
+    se = sub.add_parser(
+        "search",
+        help="keyword search X for posts/articles (result cards)",
+    )
+    se.add_argument("--query", "-q", required=True, help="search keywords")
+    se.add_argument(
+        "--sort",
+        default="latest",
+        choices=["latest", "top"],
+        help="latest (live) or top",
+    )
+    se.add_argument("--max-results", type=int, default=15)
+    se.add_argument("--max-scrolls", type=int, default=8)
+    se.add_argument(
+        "--out",
+        default="",
+        help="optional JSON path for full results",
+    )
+
     args = p.parse_args(argv)
     base = args.base
 
@@ -149,6 +168,25 @@ def main(argv: list[str] | None = None) -> int:
             except OSError as e:
                 res = {**res, "out_error": str(e)}
         # Print meta + body prefix (full body may be huge)
+        print(json.dumps(res, indent=2, default=str)[:24000])
+        return 0 if res.get("ok") else 1
+    if args.cmd == "search":
+        body = {
+            "action": "x.article_search",
+            "query": args.query,
+            "sort": args.sort,
+            "max_results": args.max_results,
+            "max_scrolls": args.max_scrolls,
+        }
+        res = call(base, "/v1/action", body)
+        if args.out and res.get("ok"):
+            try:
+                with open(args.out, "w", encoding="utf-8") as f:
+                    json.dump(res, f, indent=2, default=str)
+                if isinstance(res.get("data"), dict):
+                    res["data"]["out"] = args.out
+            except OSError as e:
+                res = {**res, "out_error": str(e)}
         print(json.dumps(res, indent=2, default=str)[:24000])
         return 0 if res.get("ok") else 1
     if args.cmd == "screenshot":

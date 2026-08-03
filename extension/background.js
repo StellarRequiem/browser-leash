@@ -7,11 +7,12 @@
  * 0.4.0: x.article_read — full X article / status / thread text extraction (scroll + expand).
  * 0.4.1: article_read via executeScript + sendMessage timeouts (poll loop cannot hang).
  * 0.4.2: hello even when disarmed; hard job timeout; bridge rejects stale extension.
+ * 0.4.3: x.article_search — keyword search result cards for posts/articles.
  */
 
 const BRIDGE = "http://127.0.0.1:8756";
 const POLL_MS = 800;
-const EXT_VERSION = "0.4.2";
+const EXT_VERSION = "0.4.3";
 
 let polling = false;
 
@@ -330,6 +331,164 @@ function pageArticleExtract(opts) {
         truncated,
         expand_clicks: expandClicks,
         scrolls: maxScrolls,
+      },
+    };
+  })();
+}
+
+/**
+ * Extract X search result cards (posts + article links) after optional scroll.
+ * Runs via executeScript on the active search tab.
+ */
+function pageSearchExtract(opts) {
+  const maxResults = Math.max(1, Math.min(Number(opts.maxResults) || 20, 50));
+  const maxScrolls = Math.max(0, Math.min(Number(opts.maxScrolls) || 8, 30));
+  const scrollPauseMs = Math.max(80, Math.min(Number(opts.scrollPauseMs) || 300, 1500));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function absUrl(href) {
+    if (!href) return "";
+    try {
+      return new URL(href, location.origin).href;
+    } catch (_) {
+      return href;
+    }
+  }
+
+  function parseEngagement(article) {
+    const out = { replies: null, reposts: null, likes: null, views: null };
+    const map = {
+      reply: "replies",
+      retweet: "reposts",
+      like: "likes",
+      analytics: "views",
+    };
+    for (const [testid, key] of Object.entries(map)) {
+      const el = article.querySelector(`[data-testid="${testid}"]`);
+      if (!el) continue;
+      const aria = el.getAttribute("aria-label") || el.innerText || "";
+      const m = aria.replace(/,/g, "").match(/([\d.]+)\s*([KkMm])?/);
+      if (!m) continue;
+      let n = parseFloat(m[1]);
+      if (m[2] && m[2].toLowerCase() === "k") n *= 1000;
+      if (m[2] && m[2].toLowerCase() === "m") n *= 1e6;
+      out[key] = Math.round(n);
+    }
+    return out;
+  }
+
+  function collectCards() {
+    const cards = [];
+    const seen = new Set();
+
+    // Long-form article anchors first
+    for (const a of document.querySelectorAll('a[href*="/i/article/"], a[href*="/articles/"]')) {
+      const href = absUrl(a.getAttribute("href") || "");
+      if (!href || seen.has(href)) continue;
+      seen.add(href);
+      const text = (a.innerText || a.textContent || "").replace(/\u200b/g, "").trim();
+      cards.push({
+        kind: "article",
+        url: href,
+        text: text.slice(0, 800),
+        author: "",
+        handle: "",
+        engagement: {},
+      });
+    }
+
+    // Status / timeline cards
+    for (const article of document.querySelectorAll('article[data-testid="tweet"]')) {
+      const textEl = article.querySelector('[data-testid="tweetText"]');
+      const text = (textEl?.innerText || "").replace(/\u200b/g, "").trim();
+      let statusUrl = "";
+      for (const a of article.querySelectorAll('a[href*="/status/"]')) {
+        const h = a.getAttribute("href") || "";
+        if (/\/status\/\d+/.test(h) && !h.includes("/analytics") && !h.includes("/photo")) {
+          statusUrl = absUrl(h.split("?")[0]);
+          break;
+        }
+      }
+      if (!statusUrl) continue;
+      if (seen.has(statusUrl)) continue;
+      seen.add(statusUrl);
+
+      let author = "";
+      let handle = "";
+      const userName = article.querySelector('[data-testid="User-Name"]');
+      if (userName) {
+        const lines = (userName.innerText || "")
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (lines[0]) author = lines[0];
+        const at = lines.find((l) => l.startsWith("@"));
+        if (at) handle = at;
+      }
+
+      // Nested article link inside a post
+      let articleUrl = "";
+      for (const a of article.querySelectorAll('a[href*="/i/article/"], a[href*="/articles/"]')) {
+        articleUrl = absUrl(a.getAttribute("href") || "");
+        if (articleUrl) break;
+      }
+
+      const engagement = parseEngagement(article);
+      cards.push({
+        kind: articleUrl ? "article_card" : "status",
+        url: articleUrl || statusUrl,
+        status_url: statusUrl,
+        article_url: articleUrl || null,
+        text: text.slice(0, 1200),
+        author,
+        handle,
+        engagement,
+      });
+    }
+
+    return cards;
+  }
+
+  return (async () => {
+    if (!location.hostname.includes("x.com") && !location.hostname.includes("twitter.com")) {
+      return {
+        ok: false,
+        code: "NOT_X",
+        detail: "Active tab is not x.com",
+        data: { url: location.href },
+      };
+    }
+
+    let lastCount = 0;
+    let stable = 0;
+    for (let i = 0; i < maxScrolls; i++) {
+      const cards = collectCards();
+      if (cards.length >= maxResults) break;
+      if (cards.length <= lastCount) {
+        stable += 1;
+        if (stable >= 2) break;
+      } else {
+        stable = 0;
+        lastCount = cards.length;
+      }
+      window.scrollBy({
+        top: Math.floor(window.innerHeight * 0.9),
+        left: 0,
+        behavior: "instant",
+      });
+      await sleep(scrollPauseMs);
+    }
+
+    const all = collectCards();
+    const results = all.slice(0, maxResults);
+    return {
+      ok: true,
+      code: "ARTICLE_SEARCH",
+      data: {
+        url: location.href,
+        title: document.title,
+        count: results.length,
+        results,
       },
     };
   })();
@@ -1059,6 +1218,79 @@ async function runJob(job) {
     }
   }
 
+  if (action === "x.article_search") {
+    // Keyword search → result cards (T1 observe). Optional navigate to search URL.
+    const query = String(p.query || p.q || "").trim();
+    const sort = String(p.sort || p.f || "latest").toLowerCase(); // latest | top
+    const maxResults = Number(p.max_results ?? p.maxResults ?? 20);
+    const maxScrolls = Number(p.max_scrolls ?? p.maxScrolls ?? 8);
+    const scrollPauseMs = Number(p.scroll_pause_ms ?? p.scrollPauseMs ?? 300);
+
+    let tabId = p.tabId || null;
+    let searchUrl = String(p.url || "").trim();
+    if (!searchUrl && query) {
+      const f = sort === "top" ? "top" : "live";
+      // Prefer article-ish hits when operator asks for articles
+      const q = p.articles_only
+        ? `${query} filter:has_engagement`
+        : query;
+      searchUrl = `https://x.com/search?q=${encodeURIComponent(q)}&src=typed_query&f=${f}`;
+    }
+    if (searchUrl) {
+      if (!hostAllowed(searchUrl)) {
+        return { ok: false, code: "HOST_DENIED", detail: searchUrl };
+      }
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) {
+        await chrome.tabs.update(tab.id, { url: searchUrl });
+        tabId = tab.id;
+      } else {
+        const created = await chrome.tabs.create({ url: searchUrl, active: true });
+        tabId = created.id;
+      }
+      await waitTabComplete(tabId).catch(() => {});
+      await new Promise((r) => setTimeout(r, 1500));
+    } else {
+      tabId = await activeTabId();
+    }
+    if (!tabId) return { ok: false, code: "NO_TAB" };
+
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const tabUrl = tab?.url || "";
+    if (!/x\.com|twitter\.com/i.test(tabUrl)) {
+      return {
+        ok: false,
+        code: "NOT_X",
+        detail: "Need query= or url= to open X search, or already be on x.com search",
+        data: { url: tabUrl },
+      };
+    }
+
+    try {
+      const injected = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: pageSearchExtract,
+        args: [{ maxResults, maxScrolls, scrollPauseMs }],
+      });
+      const res = injected?.[0]?.result;
+      if (res && typeof res === "object") {
+        if (res.ok && res.data) {
+          res.data.query = query || null;
+          res.data.sort = sort;
+          res.data.search_url = searchUrl || tabUrl;
+        }
+        return res;
+      }
+      return {
+        ok: false,
+        code: "SEARCH_EMPTY",
+        detail: "executeScript returned no search payload",
+      };
+    } catch (e) {
+      return { ok: false, code: "SEARCH_FAIL", detail: String(e) };
+    }
+  }
+
   return { ok: false, code: "UNKNOWN_ACTION", detail: action };
 }
 
@@ -1157,7 +1389,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const until = Number(st.armUntil || 0);
       sendResponse({
         version: EXT_VERSION,
-        expectVersion: bridge?.expect_extension_version || "0.4.2",
+        expectVersion: bridge?.expect_extension_version || "0.4.3",
         armed: isArmedLocal(st),
         armUntil: until,
         armMode: until > 0 ? "timed" : st.armed ? "toggle" : "off",
