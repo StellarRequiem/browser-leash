@@ -28,4 +28,11 @@ def isolate_bridge(tmp_path, monkeypatch):
     server._arm.update({"armed": False, "until": 0.0, "token": ""})
     server._queue.clear()
     server._results.clear()
+    # Simulate a connected, recently-helloing extension — the realistic operating
+    # condition. The bridge now fails fast with EXTENSION_DISCONNECTED (server.py)
+    # when the extension isn't polling; without this the precheck would fire before
+    # the argument gates and these tests would prove nothing about HOST_DENIED /
+    # EMPTY_TEXT / the post-confirm flag. Tests that need the disconnected state
+    # (see test_disconnected_extension_denied) reset last_hello to 0 themselves.
+    server._extension.update({"version": "0.5.0", "hasDebugger": True, "last_hello": server._now()})
     yield

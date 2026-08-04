@@ -83,6 +83,20 @@ def test_navigate_allowlisted_host_passes_gate(monkeypatch):
     assert any(j["action"] == "tab.navigate" for j in server._queue)
 
 
+# ---- extension liveness precheck ------------------------------------------
+
+def test_disconnected_extension_denied():
+    # Sticky bridge-arm alone is not enough: if the extension isn't helloing the
+    # bridge, an armed action fails fast with EXTENSION_DISCONNECTED before it can
+    # queue — nothing acts against a dead extension. (conftest normally simulates a
+    # live extension; here we force the disconnected state.)
+    server._set_arm(True, ttl=0)
+    server._extension.update({"last_hello": 0.0, "version": None})
+    out = server.enqueue_action({"action": "x.post", "click_only": True})
+    assert out["ok"] is False and out["code"] == "EXTENSION_DISCONNECTED"
+    assert server._queue == []  # nothing queued against a disconnected extension
+
+
 # ---- x.post validation + confirm flag -------------------------------------
 
 def test_compose_draft_empty_text_denied():
