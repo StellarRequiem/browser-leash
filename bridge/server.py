@@ -31,7 +31,17 @@ REQUIRE_POST_CONFIRM = os.environ.get("BROWSER_LEASH_POST_CONFIRM", "1") not in 
     "false",
     "no",
 )
+# Operator 2026-08-06: open-web default — navigate any host except hard denylist.
+# Layers that remain: ARM, action allowlist, post-confirm, receipts, FREEZE (agent-control).
+# Set BROWSER_LEASH_OPEN_WEB=0 to restore strict allowlist.
+OPEN_WEB = os.environ.get("BROWSER_LEASH_OPEN_WEB", "1") not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
+# Strict allowlist (used only when OPEN_WEB=0)
 ALLOWED_HOSTS = frozenset(
     {
         "x.com",
@@ -55,8 +65,48 @@ ALLOWED_HOSTS = frozenset(
         "old.reddit.com",
         "upwork.com",
         "www.upwork.com",
+        "security.alibaba.com",
+        "www.security.alibaba.com",
+        "asrc.alibaba.com",
+        "xianzhi-next.aliyun.com",
+        "yundun.console.aliyun.com",
+        "yundun.console.alibabacloud.com",
+        "xz.aliyun.com",
+        "www.alibabacloud.com",
+        "account.alibabacloud.com",
+        "myaccount.console.alibabacloud.com",
+        "passport.alibabacloud.com",
+        "account.console.alibabacloud.com",
+        "huntr.com",
+        "www.huntr.com",
+        "grok.com",
+        "www.grok.com",
+        "x.ai",
+        "www.x.ai",
+        "docs.x.ai",
+        "console.x.ai",
     }
 )
+
+# Always blocked (open-web denylist) — password managers / high-blast identity vaults
+DENIED_HOST_SUFFIXES = (
+    "1password.com",
+    "1password.eu",
+    "bitwarden.com",
+    "lastpass.com",
+    "dashlane.com",
+    "keepersecurity.com",
+    "nordpass.com",
+    "roboform.com",
+)
+DENIED_HOST_EXACT = frozenset(
+    {
+        "passwords.google.com",
+        "account.live.com",  # MS account recovery hub — still navigable via other MS if needed
+    }
+)
+# schemes never allowed for agent navigate
+DENIED_SCHEMES = frozenset({"javascript", "data", "file", "blob", "vbscript"})
 
 # Tier notes: see docs/PERMISSION_TIERS.md
 ALLOWED_ACTIONS = frozenset(
@@ -206,12 +256,48 @@ def _load_state() -> None:
         pass
 
 
+def _host_denied(host: str) -> bool:
+    h = (host or "").lower().strip(".")
+    if not h:
+        return True
+    if h in DENIED_HOST_EXACT:
+        return True
+    for suf in DENIED_HOST_SUFFIXES:
+        if h == suf or h.endswith("." + suf):
+            return True
+    return False
+
+
 def _host_allowed(url: str) -> bool:
+    """Open-web (default): any http(s) host except denylist. Strict mode: ALLOWED_HOSTS only."""
     try:
         u = urlparse(url)
     except Exception:
         return False
+    scheme = (u.scheme or "").lower()
+    if scheme in DENIED_SCHEMES:
+        return False
+    if scheme and scheme not in ("http", "https", ""):
+        # chrome:// etc. — allow only known safe chrome pages if bare chrome:
+        if scheme == "chrome" and (u.netloc or u.path or "") in (
+            "newtab",
+            "new-tab-page",
+            "",
+        ):
+            return True
+        if scheme == "about":
+            return True
+        return False
     host = (u.hostname or "").lower()
+    if not host:
+        # bare junk / empty — only about:blank is safe without a host
+        if url.strip() == "about:blank" or scheme == "about":
+            return True
+        return False
+    if _host_denied(host):
+        return False
+    if OPEN_WEB:
+        return True
     return host in ALLOWED_HOSTS
 
 
@@ -227,13 +313,20 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
             "arm_until": _arm.get("until"),
             "require_post_confirm": REQUIRE_POST_CONFIRM,
             "allowed_actions": sorted(ALLOWED_ACTIONS),
-            "allowed_hosts": sorted(ALLOWED_HOSTS),
+            "open_web": OPEN_WEB,
+            "allowed_hosts": (
+                ["*"] if OPEN_WEB else sorted(ALLOWED_HOSTS)
+            ),
+            "denied_host_suffixes": list(DENIED_HOST_SUFFIXES),
             "queue_depth": len(_queue),
             "extension": ext,
-            "expect_extension_version": "0.5.0",
+            "expect_extension_version": "0.5.3",
             "arm_mode": "toggle" if ARM_TTL_SEC <= 0 else f"timed_{ARM_TTL_SEC}s",
             "action_tiers": dict(ACTION_TIERS),
             "permission_doc": "docs/PERMISSION_TIERS.md",
+            "host_policy": (
+                "open_web+denylist" if OPEN_WEB else "strict_allowlist"
+            ),
         }
 
     if action not in ALLOWED_ACTIONS:
@@ -275,8 +368,23 @@ def enqueue_action(payload: dict[str, Any]) -> dict[str, Any]:
     if action in ("tab.navigate", "tab.create", "x.article_read", "x.article_search"):
         url = str(payload.get("url") or "")
         if url and url not in ("about:blank", "chrome://newtab/") and not _host_allowed(url):
-            _receipt("deny", {"action": action, "url": url, "reason": "HOST_DENIED"})
-            return {"ok": False, "code": "HOST_DENIED", "detail": f"host not allowlisted: {url}"}
+            reason = "HOST_DENIED"
+            try:
+                h = (urlparse(url).hostname or "").lower()
+                if _host_denied(h):
+                    reason = "HOST_DENYLIST"
+            except Exception:
+                pass
+            _receipt("deny", {"action": action, "url": url, "reason": reason, "open_web": OPEN_WEB})
+            return {
+                "ok": False,
+                "code": reason,
+                "detail": (
+                    f"host denylisted: {url}"
+                    if reason == "HOST_DENYLIST"
+                    else f"host not allowlisted: {url}"
+                ),
+            }
         if action == "x.article_search":
             q = str(payload.get("query") or payload.get("q") or "").strip()
             if not q and not url:

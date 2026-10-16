@@ -9,11 +9,14 @@
  * 0.4.2: hello even when disarmed; hard job timeout; bridge rejects stale extension.
  * 0.4.3: x.article_search — keyword search result cards for posts/articles.
  * 0.5.0: ambient browser — tab create/close/activate, wait/find/links, back/forward/reload.
+ * 0.5.1: page.screenshot — windowId + activate; <all_urls> host perm for captureVisibleTab
+ *         (activeTab alone is useless for background poll; null window was flaky).
+ * 0.5.2: report() keeps screenshot dataUrl for bridge/host disk write (was stripping → no PNG file).
  */
 
 const BRIDGE = "http://127.0.0.1:8756";
 const POLL_MS = 800;
-const EXT_VERSION = "0.5.0";
+const EXT_VERSION = "0.5.2";
 
 let polling = false;
 
@@ -44,9 +47,14 @@ async function bridgePost(path, body) {
 
 async function report(id, payload) {
   try {
-    // strip huge dataUrls from bridge report
+    // Keep dataUrl for page.screenshot so agent-control can write PNG to disk.
+    // Bridge strips dataUrl from *receipts* only (server.py); loopback can carry ~1MB.
+    // Other huge payloads still strip to avoid queue bloat.
     const p = JSON.parse(JSON.stringify(payload));
-    if (p?.data?.dataUrl) {
+    const isShot =
+      p?.code === "SCREENSHOT" ||
+      (p?.data?.mime === "image/png" && p?.data?.dataUrl);
+    if (p?.data?.dataUrl && !isShot) {
       p.data = { ...p.data, dataUrl: undefined, dataUrl_omitted: true };
     }
     await bridgePost("/v1/result", { id, ...p });
@@ -55,32 +63,87 @@ async function report(id, payload) {
   }
 }
 
+// Open-web default (2026-08-06): allow any http(s) host except hard denylist.
+// Bridge enforces the same policy; extension fails closed on denylist/schemes.
+// Set local override: chrome.storage.local openWeb=false for strict allowlist mirror.
+const OPEN_WEB_DEFAULT = true;
+
+const DENIED_HOST_SUFFIXES = [
+  "1password.com",
+  "1password.eu",
+  "bitwarden.com",
+  "lastpass.com",
+  "dashlane.com",
+  "keepersecurity.com",
+  "nordpass.com",
+  "roboform.com",
+];
+const DENIED_HOST_EXACT = new Set(["passwords.google.com"]);
+const STRICT_ALLOW = new Set([
+  "x.com",
+  "twitter.com",
+  "www.x.com",
+  "www.twitter.com",
+  "github.com",
+  "www.github.com",
+  "docs.github.com",
+  "xclusivexo.com",
+  "www.xclusivexo.com",
+  "pypi.org",
+  "www.pypi.org",
+  "localhost",
+  "127.0.0.1",
+  "privateemail.com",
+  "linkedin.com",
+  "www.linkedin.com",
+  "reddit.com",
+  "www.reddit.com",
+  "old.reddit.com",
+  "upwork.com",
+  "www.upwork.com",
+  "security.alibaba.com",
+  "www.security.alibaba.com",
+  "asrc.alibaba.com",
+  "xianzhi-next.aliyun.com",
+  "yundun.console.aliyun.com",
+  "yundun.console.alibabacloud.com",
+  "xz.aliyun.com",
+  "www.alibabacloud.com",
+  "account.alibabacloud.com",
+  "huntr.com",
+  "www.huntr.com",
+  "grok.com",
+  "www.grok.com",
+  "x.ai",
+  "www.x.ai",
+  "docs.x.ai",
+  "console.x.ai",
+]);
+
+function hostDenied(h) {
+  if (!h) return true;
+  const host = h.toLowerCase();
+  if (DENIED_HOST_EXACT.has(host)) return true;
+  for (const suf of DENIED_HOST_SUFFIXES) {
+    if (host === suf || host.endsWith("." + suf)) return true;
+  }
+  return false;
+}
+
 function hostAllowed(url) {
   try {
+    if (!url || url === "about:blank" || url.startsWith("chrome://newtab")) return true;
     const u = new URL(url);
-    const h = u.hostname.toLowerCase();
-    // Keep in sync with bridge/server.py ALLOWED_HOSTS
-    const allow = new Set([
-      "x.com",
-      "twitter.com",
-      "www.x.com",
-      "www.twitter.com",
-      "github.com",
-      "www.github.com",
-      "docs.github.com",
-      "xclusivexo.com",
-      "www.xclusivexo.com",
-      "pypi.org",
-      "www.pypi.org",
-      "localhost",
-      "127.0.0.1",
-      "privateemail.com",
-      "linkedin.com",
-      "www.linkedin.com",
-      "upwork.com",
-      "www.upwork.com",
-    ]);
-    return allow.has(h);
+    const scheme = (u.protocol || "").replace(":", "").toLowerCase();
+    if (["javascript", "data", "file", "blob", "vbscript"].includes(scheme)) return false;
+    if (scheme === "about") return true;
+    if (scheme === "chrome") return true; // chrome:// pages — operator surface
+    if (scheme && scheme !== "http" && scheme !== "https") return false;
+    const h = (u.hostname || "").toLowerCase();
+    if (hostDenied(h)) return false;
+    // open-web default
+    if (OPEN_WEB_DEFAULT) return true;
+    return STRICT_ALLOW.has(h);
   } catch {
     return false;
   }
@@ -973,11 +1036,31 @@ async function runJob(job) {
   }
 
   if (action === "page.info") {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // Multi-tab: prefer explicit tabId; else active tab in current window
+    let tab = null;
+    try {
+      if (p.tabId || p.id) {
+        tab = await chrome.tabs.get(Number(p.tabId || p.id));
+      } else {
+        const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tab = t || null;
+      }
+    } catch (_) {
+      tab = null;
+    }
     return {
       ok: true,
       code: "PAGE_INFO",
-      data: tab ? { id: tab.id, url: tab.url, title: tab.title, status: tab.status } : null,
+      data: tab
+        ? {
+            id: tab.id,
+            url: tab.url,
+            title: tab.title,
+            status: tab.status,
+            active: !!tab.active,
+            windowId: tab.windowId,
+          }
+        : null,
     };
   }
 
@@ -1294,7 +1377,27 @@ async function runJob(job) {
   }
   if (action === "page.screenshot") {
     try {
-      const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: "png" });
+      let tabId = p.tabId || (await activeTabId());
+      if (!tabId) return { ok: false, code: "NO_TAB", detail: "no tab to capture" };
+      let tab = await chrome.tabs.get(tabId);
+      if (!tab) return { ok: false, code: "NO_TAB", detail: `tab ${tabId} missing` };
+      // captureVisibleTab only sees the *visible* tab in a window — activate first
+      if (!tab.active) {
+        await chrome.tabs.update(tabId, { active: true });
+        tab = await chrome.tabs.get(tabId);
+      }
+      if (tab.windowId != null) {
+        try {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        } catch (_) {
+          /* focus may fail in background; still try capture */
+        }
+      }
+      await new Promise((r) => setTimeout(r, 60));
+      const winId = tab.windowId != null ? tab.windowId : null;
+      const dataUrl = await chrome.tabs.captureVisibleTab(winId, {
+        format: "png",
+      });
       return {
         ok: true,
         code: "SCREENSHOT",
@@ -1302,10 +1405,19 @@ async function runJob(job) {
           mime: "image/png",
           approxBytes: Math.floor((dataUrl.length * 3) / 4),
           dataUrl,
+          tabId,
+          windowId: winId,
+          url: tab.url || "",
         },
       };
     } catch (e) {
-      return { ok: false, code: "SCREENSHOT_FAIL", detail: String(e) };
+      return {
+        ok: false,
+        code: "SCREENSHOT_FAIL",
+        detail: String(e),
+        hint:
+          "Reload Browser Leash (0.5.1+) so host_permissions includes <all_urls>; ARM; tab must be on allowlisted/http(s) page",
+      };
     }
   }
   if (action === "page.press") {
