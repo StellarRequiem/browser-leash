@@ -55,6 +55,21 @@ browser-leash remains the **Chrome session** control plane only.
 
 ---
 
+## Append — 2026-08-05 (Grok parity tune-up)
+
+| Item | Change |
+|------|--------|
+| Extension | **0.5.1** — `page.screenshot` activates tab, uses `windowId`, host_permissions **`<all_urls>`** (background poll cannot use activeTab user-gesture grant) |
+| agent-control host | Write PNG when `out=` set; strip dataUrl from result |
+| desktop-leash | Absolute `/usr/sbin/screencapture` (`screencap_util`) for thin PATH under launchd |
+| Named cmds | `portfolio_preview_{start,stop,status}`, leash status, stack |
+| MCP first-class | `browser_screenshot`, `browser_click`, `browser_type`, `browser_scroll`, `browser_wait`, `desktop_screenshot`, `desktop_focus`, `desktop_screenshot_window` |
+| Doc | `~/agent-control/docs/GROK_CLAUDE_CODEX_PARITY.md` |
+
+**Operator:** Reload Browser Leash → popup **0.5.1** → ARM. Restart Grok MCP for new tools.
+
+---
+
 ## Append — 2026-07-28 (closeout sequence)
 
 | Fact | Evidence |

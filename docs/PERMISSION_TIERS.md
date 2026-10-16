@@ -20,23 +20,30 @@
 
 T4 is intentionally expensive. Operator adversarial hold-test (2026-07-28): unarmed path and disabled-Post path **held closed**.
 
-## Host allowlist policy
+## Host policy (2026-08-06 open-web)
 
-**In (professional surface):**
+**Default: `BROWSER_LEASH_OPEN_WEB=1` (open-web + denylist).**  
+Agent may navigate any `http(s)` host while **ARMed**, with remaining layers:
 
-- `x.com` / `twitter.com` — social (gated publish)
-- `github.com` — code
-- `xclusivexo.com` — own site
-- `pypi.org` / `www.pypi.org` — package proof
-- `docs.github.com` — docs
-- `localhost` / `127.0.0.1` — local tools
+| Layer | What still holds |
+|-------|------------------|
+| **ARM** | Popup ARM required |
+| **Action allowlist** | Only known actions (no free CDP) |
+| **Post confirm** | X publish still gated (T4) |
+| **Receipts** | Every deny/result logged |
+| **Host denylist** | Password managers (1Password, Bitwarden, LastPass, …) |
+| **Scheme deny** | `javascript:`, `data:`, `file:`, … |
+| **Agent FREEZE** | agent-control / mcp-assure FREEZE still blocks plane tools |
 
-**Out unless operator expands list in `bridge/server.py` + reload:**
+**Strict allowlist mode:** `BROWSER_LEASH_OPEN_WEB=0` → old professional host list only.
 
-- Arbitrary web (no free browsing)
-- Banking, mail, cloud consoles, password managers
+**Always denylisted (navigate):** `*.1password.com`, `*.bitwarden.com`, `*.lastpass.com`, `*.dashlane.com`, `passwords.google.com`, etc.
 
-To add a host: edit `ALLOWED_HOSTS`, restart bridge, append here with date + why.
+| Host / change | Date | Why |
+|---------------|------|-----|
+| open-web default | 2026-08-06 | Operator: unrestricted browse with layered measures |
+| `grok.com`, `x.ai`, … | 2026-08-06 | Connectors path (still needed in strict mode) |
+| huntr.com | 2026-08-05 | OSV disclosure walkthrough |
 
 ## Action expansion checklist
 

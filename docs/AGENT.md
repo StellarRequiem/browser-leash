@@ -26,7 +26,9 @@ python3 ~/browser-leash/bridge/client.py post --click-only
 10. Remind operator to **DISARM** when done
 11. After any extension code change: operator **Reload** until `status.extension.version` matches disk (0.3.2+)
 
-## Browser actions (ambient Chrome under leash — 0.5.0+)
+## Browser actions (ambient Chrome under leash — 0.5.1+)
+
+**Screenshot:** `page.screenshot` activates the target tab, captures via `windowId`, requires host_permissions `<all_urls>` (extension 0.5.1+). Prefer agent-control `browser.screenshot` with `out` path under `~/ops` or `/tmp`.
 
 Prefer **agent-control** host tools:
 
