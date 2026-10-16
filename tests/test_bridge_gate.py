@@ -64,15 +64,31 @@ def test_every_write_action_denied_when_disarmed():
 def test_host_allowed_pure():
     assert server._host_allowed("https://x.com/home") is True
     assert server._host_allowed("https://github.com/StellarRequiem") is True
-    assert server._host_allowed("https://evil.example.com/x") is False
+    # open-web default: arbitrary https ok
+    assert server._host_allowed("https://example.com/x") is True
+    # denylist always
+    assert server._host_allowed("https://my.1password.com/vault") is False
+    assert server._host_allowed("javascript:alert(1)") is False
     assert server._host_allowed("not a url") is False
     assert server._host_allowed("") is False
 
 
-def test_navigate_offlisted_host_denied_when_armed():
+def test_navigate_denylisted_host_denied_when_armed():
     server._set_arm(True, ttl=0)
-    out = server.enqueue_action({"action": "tab.navigate", "url": "https://evil.example.com/"})
-    assert out["ok"] is False and out["code"] == "HOST_DENIED"
+    out = server.enqueue_action(
+        {"action": "tab.navigate", "url": "https://vault.bitwarden.com/"}
+    )
+    assert out["ok"] is False and out["code"] in ("HOST_DENIED", "HOST_DENYLIST")
+
+
+def test_navigate_open_web_host_passes_gate(monkeypatch):
+    _install_fast_clock(monkeypatch)
+    server._set_arm(True, ttl=0)
+    out = server.enqueue_action(
+        {"action": "tab.navigate", "url": "https://example.com/"}
+    )
+    assert out["code"] == "TIMEOUT"  # passed host gate; no extension to complete
+    assert any(j["action"] == "tab.navigate" for j in server._queue)
 
 
 def test_navigate_allowlisted_host_passes_gate(monkeypatch):

@@ -17,7 +17,7 @@ The agent talks to a **loopback bridge**. A **Chrome extension** executes allowl
 |---------|----------|
 | Loopback only | Bridge binds `127.0.0.1` |
 | Deny-by-default | Unknown actions refused |
-| Host allowlist | Navigation only to approved hosts (x.com, twitter.com, github.com, xclusivexo.com, …) |
+| Host policy | **Open-web default** (`BROWSER_LEASH_OPEN_WEB=1`): any https except password-manager denylist; ARM + action gate + FREEZE remain |
 | **Arm / disarm** | Sticky **toggle** (popup ARM on / DISARM off). No 15m timer by default. Posts still need confirm. |
 | Post confirmation | Optional bridge flag `require_post_confirm` (default **true**): extension shows confirm before Post click |
 | Receipts | Every decision/result append-only under `receipts/` |
